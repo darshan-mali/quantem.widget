@@ -15,6 +15,7 @@ _os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 _warnings.filterwarnings("ignore", message=r"(?s).*multiple CuPy packages.*")
 _warnings.filterwarnings("ignore", message=r"(?s).*HF_TOKEN.*")
 
+from quantem.widget.choose_lattice import ChooseLattice
 from quantem.widget.show1d import Show1D
 from quantem.widget.show2d import Show2D
 from quantem.widget.show3d import Show3D
@@ -228,6 +229,7 @@ def free_gpu(verbose: bool = True) -> float:
 
 
 __all__ = [
+    "ChooseLattice",
     "Show1D",
     "Show2D",
     "Show3D",
