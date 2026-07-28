@@ -94,3 +94,17 @@ def test_choose_lattice_accepts_dataset2d() -> None:
 def test_choose_lattice_rejects_unknown_kwarg() -> None:
     with pytest.raises(TypeError):
         ChooseLattice(np.random.rand(8, 8).astype(np.float32), not_a_real_kwarg=True)
+
+
+def test_choose_lattice_static_fallback_disabled_by_default() -> None:
+    """Unlike Show2D/Show3D, ChooseLattice's live widget does not reliably
+    hide the saved-notebook fallback sibling while interactive, so the
+    fallback stays off by default to avoid a redundant visible image; users
+    can opt in via notebook_preview_format="jpeg" explicitly."""
+    widget = ChooseLattice(np.random.rand(8, 8).astype(np.float32))
+    assert not widget._static_fallback_enabled()
+
+    opted_in = ChooseLattice(
+        np.random.rand(8, 8).astype(np.float32), notebook_preview_format="jpeg"
+    )
+    assert opted_in._static_fallback_enabled()

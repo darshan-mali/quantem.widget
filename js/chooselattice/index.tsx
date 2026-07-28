@@ -20,6 +20,7 @@ import { useHideStaticFallback } from "../staticFallback";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 20;
 const CANVAS_SIZE = 512;
+const CANVAS_BORDER_PX = 1;
 const HIT_PX = 10;
 const CLICK_MOVE_THRESHOLD_PX = 4;
 const POINT_COLORS = ["#ff4d4f", "#40a9ff", "#73d13d"];
@@ -339,81 +340,96 @@ function ChooseLattice() {
 
   const canvasBox = {
     position: "relative" as const,
-    border: `1px solid ${themeColors.border}`,
+    border: `${CANVAS_BORDER_PX}px solid ${themeColors.border}`,
     overflow: "hidden",
     width: canvasW,
     height: canvasH,
   };
+  // The bordered canvas is a fixed pixel width, so the CONTENT column (title
+  // row, canvas, footer, readout) is capped to that width and everything
+  // aligns to the canvas's own edges. The background is a separate, always
+  // full-width wrapper: capping IT to the content width would leave the
+  // notebook/page background exposed beside the widget whenever the output
+  // cell is wider than the canvas.
+  const contentMaxWidth = canvasW + 2 * CANVAS_BORDER_PX;
 
   return (
     <Box
       ref={rootRef}
-      sx={{ p: `${SPACING.LG}px`, bgcolor: themeColors.bg, color: themeColors.text }}
+      sx={{
+        p: `${SPACING.LG}px`,
+        bgcolor: themeColors.bg,
+        color: themeColors.text,
+        width: "100%",
+        boxSizing: "border-box",
+      }}
     >
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
-        <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{title || "Choose Lattice"}</Typography>
-        <Stack direction="row" spacing={1}>
-          <Button
-            size="small"
-            sx={{ ...compactButton, color: themeColors.accent }}
-            disabled={!points || points.length === 0}
-            onClick={() => setPoints([])}
-          >
-            Clear Points
-          </Button>
+      <Box sx={{ maxWidth: contentMaxWidth }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
+          <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{title || "Choose Lattice"}</Typography>
+          <Stack direction="row" spacing={1}>
+            <Button
+              size="small"
+              sx={{ ...compactButton, color: themeColors.accent }}
+              disabled={!points || points.length === 0}
+              onClick={() => setPoints([])}
+            >
+              Clear Points
+            </Button>
+          </Stack>
         </Stack>
-      </Stack>
 
-      <Box ref={containerRef} sx={canvasBox}>
-        <canvas
-          ref={canvasRef}
-          style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, imageRendering: "pixelated" }}
-        />
-        <canvas
-          ref={uiRef}
-          style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
-        />
-        <canvas
-          width={canvasW}
-          height={canvasH}
-          style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, cursor: "crosshair", opacity: 0 }}
-          onWheel={handleWheel}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMoveReadout}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={() => { dragRef.current = null; setCursorPos(null); }}
-          onDoubleClick={handleDoubleClick}
-        />
-      </Box>
+        <Box ref={containerRef} sx={canvasBox}>
+          <canvas
+            ref={canvasRef}
+            style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, imageRendering: "pixelated" }}
+          />
+          <canvas
+            ref={uiRef}
+            style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
+          />
+          <canvas
+            width={canvasW}
+            height={canvasH}
+            style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, cursor: "crosshair", opacity: 0 }}
+            onWheel={handleWheel}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMoveReadout}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={() => { dragRef.current = null; setCursorPos(null); }}
+            onDoubleClick={handleDoubleClick}
+          />
+        </Box>
 
-      <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
-        {(points || []).length < 3
-          ? "Click to place the next point. Scroll to zoom, drag to pan."
-          : "Drag a point to adjust it. Scroll to zoom, drag to pan."}
-        {cursorPos && (
-          <span style={{ marginLeft: 8, color: themeColors.accent }}>
-            ({cursorPos[0].toFixed(1)}, {cursorPos[1].toFixed(1)})
-          </span>
-        )}
-      </Typography>
+        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
+          {(points || []).length < 3
+            ? "Click to place the next point. Scroll to zoom, drag to pan."
+            : "Drag a point to adjust it. Scroll to zoom, drag to pan."}
+          {cursorPos && (
+            <span style={{ marginLeft: 8, color: themeColors.accent }}>
+              ({cursorPos[0].toFixed(1)}, {cursorPos[1].toFixed(1)})
+            </span>
+          )}
+        </Typography>
 
-      <Box sx={{ mt: `${SPACING.SM}px` }}>
-        {(pointLabels || []).map((label, i) => {
-          const p = (points || [])[i];
-          const origin = (points || [])[0];
-          // Origin is reported as its raw pixel position; the other two
-          // points are reported as lattice vectors relative to the origin
-          // (u = a1 - origin, v = a2 - origin), not raw pixel positions.
-          const isVector = i > 0;
-          const value = isVector && p && origin
-            ? [p[0] - origin[0], p[1] - origin[1]]
-            : (!isVector ? p : null);
-          return (
-            <Typography key={label + i} sx={{ fontSize: 11, fontFamily: "monospace", color: value ? POINT_COLORS[i % POINT_COLORS.length] : themeColors.textMuted }}>
-              {label}: {value ? `(${value[0].toFixed(1)}, ${value[1].toFixed(1)})` : "not placed"}
-            </Typography>
-          );
-        })}
+        <Box sx={{ mt: `${SPACING.SM}px` }}>
+          {(pointLabels || []).map((label, i) => {
+            const p = (points || [])[i];
+            const origin = (points || [])[0];
+            // Origin is reported as its raw pixel position; the other two
+            // points are reported as lattice vectors relative to the origin
+            // (u = a1 - origin, v = a2 - origin), not raw pixel positions.
+            const isVector = i > 0;
+            const value = isVector && p && origin
+              ? [p[0] - origin[0], p[1] - origin[1]]
+              : (!isVector ? p : null);
+            return (
+              <Typography key={label + i} sx={{ fontSize: 11, fontFamily: "monospace", color: value ? POINT_COLORS[i % POINT_COLORS.length] : themeColors.textMuted }}>
+                {label}: {value ? `(${value[0].toFixed(1)}, ${value[1].toFixed(1)})` : "not placed"}
+              </Typography>
+            );
+          })}
+        </Box>
       </Box>
     </Box>
   );

@@ -102,6 +102,17 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
         Embed full interactive state in the notebook so a cold reopen
         restores the picked points. See ``StaticFallbackMixin`` for the
         image-only fallback used otherwise.
+    notebook_preview_format : {"jpeg", "webp", "png"} or None, default None
+        Static preview format used when ``save_state=False``. Defaults to
+        ``None`` (no fallback image): unlike Show2D/Show3D, ChooseLattice's
+        live widget does not reliably hide the saved-notebook fallback
+        sibling while interactive, so enabling it shows a redundant image
+        alongside the live widget. Opt in explicitly if a cold-reopen
+        preview is worth that tradeoff.
+    notebook_preview_quality : int, default 88
+        Lossy preview quality for JPEG/WebP, from 1 to 100. Ignored for PNG.
+    notebook_preview_max_px : int, default 512
+        Longest image side for the saved-notebook preview.
 
     Notes
     -----
