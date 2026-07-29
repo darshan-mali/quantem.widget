@@ -3,6 +3,7 @@
 4D-STEM rendering needs a GPU + real master files, so it is exercised manually
 (see docs); here we cover the routing logic and the image paths, which run on CPU.
 """
+import json
 import pathlib
 from types import SimpleNamespace
 
@@ -15,50 +16,6 @@ from quantem.widget import cli
 
 def _png(path, shape=(32, 32)):
     Image.fromarray((np.random.rand(*shape) * 255).astype("uint8")).save(path)
-
-
-def test_jupyter_launch_enables_widget_state_save(tmp_path, monkeypatch):
-    monkeypatch.setenv("JUPYTERLAB_SETTINGS_DIR", str(tmp_path / "lab-settings"))
-    settings_path = cli._enable_jupyterlab_widget_state_save()
-
-    assert settings_path == (
-        tmp_path
-        / "lab-settings"
-        / "@jupyter-widgets"
-        / "jupyterlab-manager"
-        / "plugin.jupyterlab-settings"
-    )
-    assert '"saveState": true' in settings_path.read_text()
-
-    settings_path.write_text('// comment from JupyterLab\n{"other": 3, "saveState": false}\n')
-    cli._enable_jupyterlab_widget_state_save()
-    assert '"other": 3' in settings_path.read_text()
-    assert '"saveState": true' in settings_path.read_text()
-
-
-def test_launch_notebook_uses_current_python_when_jupyter_not_on_path(tmp_path, monkeypatch):
-    notebook = tmp_path / "viewer.ipynb"
-    notebook.write_text("{}")
-    calls = []
-
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
-    monkeypatch.setattr("shutil.which", lambda name: None)
-
-    def fake_run(command, **kwargs):
-        calls.append(("run", command, kwargs))
-        return SimpleNamespace(returncode=0)
-
-    def fake_popen(command, **kwargs):
-        calls.append(("popen", command, kwargs))
-        return SimpleNamespace()
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr("subprocess.Popen", fake_popen)
-
-    cli._launch_notebook(notebook, no_open=False)
-
-    assert calls[0][1][:4] == [cli.sys.executable, "-m", "jupyter", "lab"]
-    assert calls[1][1] == [cli.sys.executable, "-m", "jupyter", "lab", str(notebook)]
 
 
 def test_embed_jpeg_adds_image_to_widget_only_output(tmp_path):
@@ -175,7 +132,9 @@ def _showptycho_folder(tmp_path):
     (source / "scan_master.h5").write_bytes(b"master")
     (source / "scan_data_000001.h5").write_bytes(b"data")
     (folder / "index.html").write_text("<!doctype html><title>ShowPtycho</title>", encoding="utf-8")
-    (folder / "manifest.json").write_text(
+    snapshots = folder / "snapshots"
+    snapshots.mkdir()
+    (snapshots / "manifest.json").write_text(
         """{
   "schema_version": 2,
   "format": "quantem.showptycho.webgpu.folder.v2",
@@ -199,7 +158,21 @@ def test_detect_showptycho_folder_export(tmp_path):
 
     assert cli._detect(folder, "auto") == "showptycho"
     assert cli._detect(folder / "index.html", "auto") == "showptycho"
-    assert cli._detect(folder, "ptycho") == "showptycho"
+    assert cli._detect(folder, "showptycho") == "showptycho"
+
+
+def test_showptycho_folder_rejects_retired_top_level_manifest(tmp_path):
+    folder = tmp_path / "retired-export"
+    folder.mkdir()
+    (folder / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    (folder / "manifest.json").write_text(
+        json.dumps({"format": "quantem.showptycho.webgpu.folder.v2"}),
+        encoding="utf-8",
+    )
+
+    assert cli._is_showptycho_folder_export(folder) is False
+    with pytest.raises(ValueError, match="snapshots/manifest.json"):
+        cli._showptycho_folder(folder)
 
 
 def test_detect_showptycho_master_when_forced(tmp_path):
@@ -208,19 +181,92 @@ def test_detect_showptycho_master_when_forced(tmp_path):
     master.write_bytes(b"\x00")
 
     assert cli._detect(master, "auto") == "4dstem"
-    assert cli._detect(master, "ptycho") == "showptycho-master"
+    assert cli._detect(master, "showptycho") == "showptycho-master"
 
 
-@pytest.mark.parametrize("command", ["ptycho", "showptycho"])
-def test_ptycho_master_cli_uses_native_bin_default(tmp_path, monkeypatch, command):
+def test_showptycho_folder_builds_user_owned_anonymous_project(
+    tmp_path,
+    monkeypatch,
+):
+    """A folder command owns one catalog and one isolated result per master."""
+
+    for name in ("first_master.h5", "second_master_wrapper.h5"):
+        (tmp_path / name).write_bytes(b"\x00")
+
+    def fake_render(master, args, *, out_dir=None):
+        assert out_dir is not None
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "index.html").write_text(
+            "<!doctype html><title>ShowPtycho</title>", encoding="utf-8"
+        )
+        snapshots = out_dir / "snapshots"
+        snapshots.mkdir()
+        (snapshots / "cal.json").write_text("{}\n", encoding="utf-8")
+        (out_dir / "ssb_fit.json").write_text(
+            json.dumps({"backend": "mps", "num_bf": 42, "loss": 0.125}),
+            encoding="utf-8",
+        )
+        return out_dir
+
+    def fake_raw_viewer(master, folder, *, label, target_stem=None):
+        assert target_stem is not None
+        viewer = folder / "show4dstem" / ".viewer" / "Show4DSTEM.html"
+        viewer.parent.mkdir(parents=True)
+        viewer.write_text("<!doctype html><title>Show4DSTEM</title>")
+        return viewer
+
+    served = {}
+    monkeypatch.setattr(cli, "_render_showptycho_master", fake_render)
+    monkeypatch.setattr(cli, "_write_show4dstem_viewer", fake_raw_viewer)
+    monkeypatch.setattr(
+        cli,
+        "_serve_showptycho_folder",
+        lambda folder, **kwargs: served.update(folder=folder, **kwargs),
+    )
+    output_root = tmp_path / "user" / "QuantEM" / "showptycho"
+    monkeypatch.setattr(cli, "_default_showptycho_root", lambda: output_root)
+
+    assert cli.main([
+        "showptycho",
+        str(tmp_path),
+        "--trials", "0",
+        "--anonymize",
+        "--no-open",
+    ]) == 0
+
+    root = output_root / tmp_path.name
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert served["folder"] == root
+    assert manifest["format"] == "quantem.showptycho.collection.v1"
+    assert [item["label"] for item in manifest["datasets"]] == [
+        "Dataset 001",
+        "Dataset 002",
+    ]
+    assert all("source" not in item for item in manifest["datasets"])
+    assert (root / "dataset-001" / "index.html").is_file()
+    assert (root / "dataset-002" / "index.html").is_file()
+    assert manifest["datasets"][0]["calibration"] == (
+        "dataset-001/snapshots/cal.json"
+    )
+    assert (root / manifest["datasets"][0]["calibration"]).is_file()
+    raw_viewer = root / manifest["datasets"][0]["show4dstem"]
+    assert raw_viewer == (
+        root / "dataset-001" / "show4dstem" / ".viewer" / "Show4DSTEM.html"
+    )
+    assert raw_viewer.is_file()
+    assert (root / "ShowPtycho.command").is_file()
+    assert cli._detect(root, "showptycho") == "showptycho-collection"
+
+
+def test_showptycho_master_cli_uses_native_bin_default(tmp_path, monkeypatch):
     """C2: ptychography master generation keeps native detector pixels by default."""
     master = tmp_path / "scan_master.h5"
     master.write_bytes(b"\x00")
-    folder = _showptycho_folder(tmp_path)
+    folder = tmp_path / "project"
     seen = {}
 
-    def fake_render(path, args):
-        seen["path"] = path
+    def fake_collection(masters, args, *, source_dir=None):
+        seen["path"] = masters[0]
         seen["det_bin"] = cli._effective_det_bin(args, default=1)
         return folder
 
@@ -228,14 +274,129 @@ def test_ptycho_master_cli_uses_native_bin_default(tmp_path, monkeypatch, comman
         seen["served"] = path
         seen["no_open"] = no_open
 
-    monkeypatch.setattr(cli, "_render_showptycho_master", fake_render)
+    monkeypatch.setattr(cli, "_render_showptycho_collection", fake_collection)
     monkeypatch.setattr(cli, "_serve_showptycho_folder", fake_serve)
 
-    assert cli.main([command, str(master), "--no-open"]) == 0
+    assert cli.main(["showptycho", str(master), "--no-open"]) == 0
     assert seen["path"] == master.resolve()
     assert seen["det_bin"] == 1
     assert seen["served"] == folder
     assert seen["no_open"] is True
+
+
+def test_showptycho_cli_routes_exact_mps_optimization_options(tmp_path, monkeypatch):
+    """C2b: CLI exposes the canonical 200-trial + Nelder-Mead workflow."""
+    master = tmp_path / "scan_master.h5"
+    master.write_bytes(b"\x00")
+    seen = {}
+
+    def fake_collection(masters, args, *, source_dir=None):
+        seen["path"] = masters[0]
+        seen["trials"] = args.trials
+        seen["refinement"] = args.refinement
+        seen["backend"] = args.backend
+        seen["drag_bf"] = args.drag_bf
+        return tmp_path / "project"
+
+    monkeypatch.setattr(cli, "_render_showptycho_collection", fake_collection)
+    monkeypatch.setattr(cli, "_serve_showptycho_folder", lambda *args, **kwargs: None)
+
+    assert cli.main([
+        "showptycho",
+        str(master),
+        "--trials", "200",
+        "--refinement", "nelder-mead",
+        "--backend", "mps",
+        "--no-open",
+    ]) == 0
+    assert seen == {
+        "path": master.resolve(),
+        "trials": 200,
+        "refinement": "nelder-mead",
+        "backend": "mps",
+        "drag_bf": 1.0,
+    }
+
+
+def test_showptycho_replaces_old_ptycho_command(capsys):
+    """C3: stale CLI name, expect argparse to reject it without an alias."""
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ptycho"])
+
+    assert exc_info.value.code == 2
+    assert "showptycho" in capsys.readouterr().err
+
+
+def test_cli_exposes_only_widget_and_export_commands(capsys):
+    """C4: top-level help, expect no acquisition or infrastructure commands."""
+
+    assert cli.main([]) == 0
+    output = capsys.readouterr().out
+
+    assert "showptycho" in output
+    assert "data-transfer" not in output
+    assert "jupyter" not in output
+    assert "screen" not in output
+
+
+def test_showptycho_in_place_is_explicit(tmp_path, monkeypatch):
+    """C5: shared source, expect writes beside it only with --in-place."""
+
+    master = tmp_path / "scan_master.h5"
+    master.write_bytes(b"\x00")
+    args = SimpleNamespace(out=None, in_place=True)
+
+    target = cli._showptycho_collection_output_dir([master], args, None)
+
+    assert target == tmp_path / "quantem" / "showptycho"
+
+
+def test_showptycho_rejects_out_with_in_place(tmp_path):
+    """C6: conflicting ownership options, expect a deterministic error."""
+
+    master = tmp_path / "scan_master.h5"
+    args = SimpleNamespace(out=str(tmp_path / "results"), in_place=True)
+
+    with pytest.raises(ValueError, match="either --out or --in-place"):
+        cli._showptycho_collection_output_dir([master], args, None)
+
+
+def test_showptycho_writes_direct_show4dstem_viewer(tmp_path, monkeypatch):
+    """C7: raw-data companion, expect one direct browser Show4DSTEM viewer."""
+
+    from quantem.widget import show4dstem_webgpu_export
+
+    master = tmp_path / "scan_master.h5"
+    folder = tmp_path / "project" / "scan"
+    snapshots = folder / "snapshots"
+    snapshots.mkdir(parents=True)
+    (snapshots / "cal.json").write_text(json.dumps({
+        "scan_region": {"shape": [512, 512]},
+        "detector_shape": [192, 192],
+    }))
+    seen = {}
+
+    def fake_export(path, out_dir, **kwargs):
+        seen.update(master=path, out_dir=out_dir, **kwargs)
+        viewer = out_dir / ".viewer" / "Show4DSTEM.html"
+        viewer.parent.mkdir(parents=True)
+        viewer.write_text("<!doctype html><title>Show4DSTEM</title>")
+        return viewer
+
+    monkeypatch.setattr(
+        show4dstem_webgpu_export,
+        "export_show4dstem_hdf5_viewer",
+        fake_export,
+    )
+    viewer = cli._write_show4dstem_viewer(master, folder, label="scan")
+
+    assert viewer.is_file()
+    assert seen["master"] == master
+    assert seen["out_dir"] == folder / "show4dstem"
+    assert seen["scan_shape"] == (512, 512)
+    assert seen["detector_shape"] == (192, 192)
+    assert seen["target_stem"] is None
 
 
 def test_show4dstem_cli_count_defaults_to_full_detector(tmp_path, monkeypatch):
@@ -260,7 +421,7 @@ def test_show4dstem_cli_count_defaults_to_full_detector(tmp_path, monkeypatch):
         seen["notebook"] = notebook
         seen["no_open"] = no_open
 
-    monkeypatch.setattr("quantem.widget.io.discover_masters", fake_discover)
+    monkeypatch.setattr("quantem.gpu.io.discover", fake_discover)
     monkeypatch.setattr(cli, "_render_4dstem_notebook", fake_render)
     monkeypatch.setattr(cli, "_launch_notebook", fake_launch)
 
@@ -282,13 +443,13 @@ def test_show4dstem_cli_count_requires_enough_masters(tmp_path, monkeypatch):
     def fake_discover(path, verbose=False):
         return [str(tmp_path / "scan_0_master.h5")]
 
-    monkeypatch.setattr("quantem.widget.io.discover_masters", fake_discover)
+    monkeypatch.setattr("quantem.gpu.io.discover", fake_discover)
 
     assert cli.main(["show4dstem", str(tmp_path), "--count", "7", "--no-open"]) == 1
 
 
 def test_show4dstem_webgpu_cli_opens_generated_command(tmp_path, monkeypatch):
-    """C5: WebGPU CLI uses the browser lazy export entry path."""
+    """C5: WebGPU CLI uses the browser HDF5-backed export entry path."""
     (tmp_path / "scan_0_master.h5").write_bytes(b"\x00")
     out = tmp_path / "artifact" / "index.html"
     out.parent.mkdir()
@@ -310,7 +471,7 @@ def test_show4dstem_webgpu_cli_opens_generated_command(tmp_path, monkeypatch):
         seen["opened"] = path
         seen["no_open"] = no_open
 
-    monkeypatch.setattr("quantem.widget.io.discover_masters", fake_discover)
+    monkeypatch.setattr("quantem.gpu.io.discover", fake_discover)
     monkeypatch.setattr(cli, "_render_4dstem_webgpu_h5", fake_render)
     monkeypatch.setattr(cli, "_open_show4dstem_command", fake_open)
 
@@ -332,8 +493,8 @@ def test_show4dstem_webgpu_cli_opens_generated_command(tmp_path, monkeypatch):
     assert seen["no_open"] is True
 
 
-def test_render_show4dstem_webgpu_h5_uses_anonymous_symlinks(tmp_path, monkeypatch):
-    """C6: WebGPU CLI export links source H5 masters instead of copying data."""
+def test_render_show4dstem_webgpu_h5_uses_anonymous_h5_urls(tmp_path, monkeypatch):
+    """C6: WebGPU CLI export links source H5 masters instead of preprocessing them."""
     import quantem.widget as qw
 
     masters = []
@@ -347,26 +508,25 @@ def test_render_show4dstem_webgpu_h5_uses_anonymous_symlinks(tmp_path, monkeypat
     def fake_contract(master):
         return {"scan_shape": (4, 4), "detector_shape": (8, 8), "n_frames": 16}
 
-    def fake_lazy_sidecar(folder, *, label, scan_shape, detector_shape):
-        sidecar = pathlib.Path(folder) / f"{label}_lazy"
-        sidecar.mkdir()
-        (sidecar / "meta.json").write_text("{}", encoding="utf-8")
-        return f"{label}_lazy/"
+    def fake_export(widget, out_dir, *, title=None, h5_decode_dtype=None):
+        seen["bundle"] = {
+            "out_dir": pathlib.Path(out_dir),
+            "title": title,
+            "h5_decode_dtype": h5_decode_dtype,
+        }
+        root = pathlib.Path(out_dir)
+        (root / ".viewer").mkdir()
+        (root / ".viewer" / "Show4DSTEM.html").write_text("<!doctype html>", encoding="utf-8")
+        (root / "Show4DSTEM.command").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 
     class FakeShow4DSTEM:
         def __init__(self, data, **kwargs):
             seen["kwargs"] = kwargs
 
-        def export_html(self, path, *, title=None, dtype=None, det_bin=None):
-            seen["export"] = {"path": path, "title": title, "dtype": dtype, "det_bin": det_bin}
-            target = pathlib.Path(path)
-            target.write_text("<!doctype html>", encoding="utf-8")
-            (target.parent / "Show4DSTEM.command").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-
     monkeypatch.setattr("quantem.widget.show4dstem_factory._master_file_contract", fake_contract)
     monkeypatch.setattr(
-        "quantem.widget.show4dstem_webgpu_export.build_lazy_show4dstem_sidecar",
-        fake_lazy_sidecar,
+        "quantem.widget.show4dstem_webgpu_export.export_show4dstem_webgpu_bundle",
+        fake_export,
     )
     monkeypatch.setattr(qw, "Show4DSTEM", FakeShow4DSTEM)
     args = SimpleNamespace(det_bin=1, dtype="u8", out=str(tmp_path / "out"), title=None, verbose=False)
@@ -374,17 +534,21 @@ def test_render_show4dstem_webgpu_h5_uses_anonymous_symlinks(tmp_path, monkeypat
     html = cli._render_4dstem_webgpu_h5(masters, "private_folder", args)
 
     assert html == tmp_path / "out" / "private_folder_show4dstem_webgpu" / "index.html"
-    assert "h5_urls" not in seen["kwargs"]
-    assert seen["kwargs"]["lazy_urls"] == ["tilt_00_lazy/", "tilt_01_lazy/"]
+    assert "lazy_urls" not in seen["kwargs"]
+    assert seen["kwargs"]["h5_urls"] == ["../tilt_00_master.h5", "../tilt_01_master.h5"]
     assert seen["kwargs"]["backend"] == "webgpu"
     assert seen["kwargs"]["scan_shape"] == (4, 4)
     assert seen["kwargs"]["detector_shape"] == (8, 8)
-    assert seen["export"]["dtype"] == "uint8"
-    assert seen["export"]["det_bin"] == 1
+    assert seen["kwargs"]["view_mode"] == "multiple"
+    assert seen["kwargs"]["compare_max_panels"] == 2
+    assert seen["kwargs"]["compare_group_mode"] == "all"
+    assert seen["bundle"]["h5_decode_dtype"] == "uint8"
+    assert seen["bundle"]["out_dir"] == html.parent
     assert (html.parent / "tilt_00_master.h5").is_symlink()
     assert (html.parent / "tilt_00_master.h5").resolve() == pathlib.Path(masters[0])
     assert (html.parent / "tilt_00_data_000001.h5").is_symlink()
     assert (html.parent / "tilt_00_data_000001.h5").resolve() == tmp_path / "private_source_0_data_000001.h5"
+    assert not (html.parent / "tilt_00_lazy").exists()
 
 
 def test_render_show4dstem_folder_notebook_records_backend_count_and_devices(tmp_path):
@@ -417,21 +581,21 @@ def test_render_show4dstem_folder_notebook_records_backend_count_and_devices(tmp
 
 def test_showptycho_auto_calibration_selects_matching_source(tmp_path):
     """C7: automatic calibration search picks the matching microscope source."""
-    master = tmp_path / "BTO_18_master.h5"
+    master = tmp_path / "reference_512_master.h5"
     master.write_bytes(b"\x00")
-    cal_dir = tmp_path / "quantem" / "screen"
+    cal_dir = tmp_path / "quantem" / "showptycho" / "reference_512"
     cal_dir.mkdir(parents=True)
-    cal_path = cal_dir / "_calibrations.json"
+    cal_path = cal_dir / "calibration.json"
     cal_path.write_text(
         """[
   {
-    "source_stem": "BTO_17",
+    "source_stem": "reference_511",
     "rotation_angle_deg": 1,
     "aberrations": {"C10": 2, "C12": 3, "phi12": 0.1},
     "loss": 9
   },
   {
-    "source_stem": "BTO_18",
+    "source_stem": "reference_512",
     "rotation_angle_deg": 158.9,
     "aberrations": {"C10": 78.1, "C12": 17.4, "phi12": 0.58},
     "semiangle_mrad": 30,
@@ -447,7 +611,7 @@ def test_showptycho_auto_calibration_selects_matching_source(tmp_path):
     calibration, path = cli._resolve_showptycho_calibration(master, args)
 
     assert path == cal_path
-    assert calibration.source_stem == "BTO_18"
+    assert calibration.source_stem == "reference_512"
     assert calibration.rotation_angle_deg == 158.9
     assert calibration.semiangle_mrad == 30
 
@@ -485,6 +649,7 @@ def test_ptycho_geometry_prefers_cli_then_calibration_then_metadata():
         semiangle_mrad=28,
         scan_sampling_A=0.27,
         voltage_kV=200,
+        det_sampling_mrad_px=None,
     )
     meta = {
         "semiangle_mrad": 22,
@@ -723,11 +888,10 @@ def test_show4dstem_watch_requires_live_folder_notebook(tmp_path):
     assert cli.main(["show4dstem", str(tmp_path), "--watch", "--html", "--no-open"]) == 1
 
 
-@pytest.mark.parametrize("command", ["ptycho", "showptycho"])
-def test_ptycho_cli_validates_folder_without_opening(tmp_path, capsys, command):
+def test_showptycho_cli_validates_folder_without_opening(tmp_path, capsys):
     folder = _showptycho_folder(tmp_path)
 
-    assert cli.main([command, str(folder), "--no-open"]) == 0
+    assert cli.main(["showptycho", str(folder), "--no-open"]) == 0
 
     out = capsys.readouterr().out
     assert "ShowPtycho folder:" in out
@@ -811,6 +975,18 @@ def test_showptycho_range_handler_writes_snapshots_only(tmp_path):
         assert (folder / "snapshots" / "snapshots.json").read_bytes() == b'[{"C10": 1}]'
         assert not (folder / "saves").exists()
 
+        conn.request(
+            "PUT",
+            "/dataset-001/snapshots/snapshots.json",
+            body=b'[{"C10": 2}]',
+        )
+        response = conn.getresponse()
+        assert response.status == 204
+        response.read()
+        assert (
+            folder / "dataset-001" / "snapshots" / "snapshots.json"
+        ).read_bytes() == b'[{"C10": 2}]'
+
         conn.request("PUT", "/snapshots/snapshot_test.jpg", body=b"jpeg")
         response = conn.getresponse()
         assert response.status == 204
@@ -836,116 +1012,6 @@ def test_showptycho_range_handler_writes_snapshots_only(tmp_path):
         thread.join(timeout=5)
 
 
-def test_data_transfer_cli_plan_inspect_copy_update_and_show4dstem(tmp_path, monkeypatch, capsys):
-    import json
-    import quantem.widget.io.hdf5 as hdf5
-
-    source = tmp_path / "source"
-    target = tmp_path / "target"
-    source.mkdir()
-    target.mkdir()
-    (source / "scan_000_master.h5").write_bytes(b"master")
-    (source / "scan_000_data_000001.h5").write_bytes(b"data")
-    manifest = tmp_path / "transfer.json"
-
-    monkeypatch.setattr(hdf5, "disk_of", lambda path: "disk")
-    monkeypatch.setattr(hdf5, "is_master_ready", lambda path: True)
-
-    assert cli.main([
-        "data-transfer",
-        "plan",
-        str(source),
-        str(target),
-        "--manifest",
-        str(manifest),
-    ]) == 0
-    assert manifest.exists()
-
-    assert cli.main([
-        "data-transfer",
-        "inspect",
-        "--manifest",
-        str(manifest),
-    ]) == 0
-
-    assert cli.main([
-        "data-transfer",
-        "copy",
-        "--manifest",
-        str(manifest),
-    ]) == 0
-    assert not (target / "scan_000_master.h5").exists()
-
-    assert cli.main([
-        "data-transfer",
-        "copy",
-        "--manifest",
-        str(manifest),
-        "--execute",
-    ]) == 0
-    assert (target / "scan_000_master.h5").read_bytes() == b"master"
-
-    assert cli.main([
-        "data-transfer",
-        "masters",
-        "--manifest",
-        str(manifest),
-    ]) == 0
-    captured = capsys.readouterr()
-    assert "ready masters: 1" in captured.out
-    assert "scan_000_master.h5" in captured.out
-
-    (source / "scan_001_master.h5").write_bytes(b"master-2")
-    assert cli.main([
-        "data-transfer",
-        "update",
-        "--manifest",
-        str(manifest),
-        "--show-masters",
-    ]) == 0
-    plan = json.loads(manifest.read_text())
-    assert [entry["logical_id"] for entry in plan["entries"]] == ["scan_000", "scan_001"]
-
-    assert cli.main([
-        "data-transfer",
-        "masters",
-        "--manifest",
-        str(manifest),
-        "--all-masters",
-    ]) == 0
-    captured = capsys.readouterr()
-    assert "planned masters: 2" in captured.out
-    assert "scan_001_master.h5" in captured.out
-
-    dest = tmp_path / "notebooks"
-    assert cli.main([
-        "data-transfer",
-        "show4dstem",
-        "--manifest",
-        str(manifest),
-        "--gpus",
-        "0,1",
-        "--page-budget",
-        "2",
-        "--bin",
-        "1",
-        "--dtype",
-        "u8",
-        "--no-open",
-        "--out",
-        str(dest),
-    ]) == 0
-    notebooks = list(dest.glob("*_transferred_show4dstem.ipynb"))
-    assert len(notebooks) == 1
-    code = "".join(json.loads(notebooks[0].read_text())["cells"][1]["source"])
-    assert "target_masters(plan)" in code
-    assert "devices = [0, 1]" in code
-    assert "det_bin=1" in code
-    assert "dtype='u8'" in code
-    assert "page_budget=2" in code
-    assert "Show4DSTEM(" in code
-
-
 def test_show4dstem_html_cli_threads_full_dtype_to_load_and_export() -> None:
     """C1: CLI full export docs, expect --dtype uint16 to reach load and export."""
     import inspect
@@ -960,6 +1026,81 @@ def test_show4dstem_html_cli_threads_full_dtype_to_load_and_export() -> None:
     assert cli._show4dstem_export_dtype(SimpleNamespace(dtype="uint16")) == "uint16"
     assert cli._show4dstem_export_dtype(SimpleNamespace(dtype="u16")) == "uint16"
     assert cli._show4dstem_export_dtype(SimpleNamespace(dtype="uint8")) == "uint8"
+
+
+def test_showptycho_cli_threads_explicit_dtype_to_ssb_open() -> None:
+    """C1b: ShowPtycho optimization must honor its requested load dtype."""
+    import inspect
+
+    source = inspect.getsource(cli._render_showptycho_master)
+
+    assert "dtype=_showptycho_decode_dtype(args)" in source
+
+
+def test_showptycho_fit_records_compute_and_ui_provenance(monkeypatch) -> None:
+    """C1c: fit records identify all packages without local source paths."""
+    import inspect
+
+    seen = []
+
+    def fake_source_state(*, version, module_file):
+        seen.append((version, module_file))
+        return {"version": version, "commit": "abc123", "dirty": False}
+
+    monkeypatch.setattr(cli, "_package_source_state", fake_source_state)
+
+    provenance = cli._showptycho_software_provenance()
+    render_source = inspect.getsource(cli._render_showptycho_master)
+
+    assert set(provenance) == {"quantem", "quantem.gpu", "quantem.widget"}
+    assert all(state["commit"] == "abc123" for state in provenance.values())
+    assert all("/" not in key for key in provenance)
+    assert len(seen) == 3
+    assert "software = _showptycho_software_provenance()" in render_source
+    assert '"software": software' in render_source
+    assert '"export_software": software' in render_source
+
+
+def test_showptycho_anonymization_preserves_science_and_redacts_sources() -> None:
+    payload = {
+        "source_path": "/private/session/sample_master.h5",
+        "loss": 0.125,
+        "calibration": {
+            "source_file": "/private/session/sample_master.h5",
+            "aberrations": {"C10": 73.0},
+        },
+        "trials": [{"value": 0.2}],
+    }
+
+    redacted = cli._anonymize_showptycho_payload(payload)
+    assert redacted["source_path"] == "redacted_local_source"
+    assert redacted["calibration"]["source_file"] == "redacted_local_source"
+    assert redacted["loss"] == payload["loss"]
+    assert redacted["calibration"]["aberrations"] == {"C10": 73.0}
+    assert redacted["trials"] == payload["trials"]
+
+
+def test_showptycho_reused_fit_records_current_export_software(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fit_record = tmp_path / "ssb_fit.json"
+    fit_record.write_text(json.dumps({
+        "source_path": "/private/acquisition/master.h5",
+        "software": {"quantem.gpu": {"commit": "fit-commit"}},
+        "loss": 0.125,
+    }))
+    current = {"quantem.gpu": {"commit": "export-commit", "dirty": False}}
+    monkeypatch.setattr(cli, "_showptycho_software_provenance", lambda: current)
+
+    payload = cli._showptycho_reused_fit_payload(
+        fit_record,
+        anonymize=True,
+    )
+
+    assert payload["software"]["quantem.gpu"]["commit"] == "fit-commit"
+    assert payload["export_software"] == current
+    assert payload["source_path"] == "redacted_local_source"
 
 
 def test_show4dstem_html_cli_rejects_float32_export_dtype() -> None:

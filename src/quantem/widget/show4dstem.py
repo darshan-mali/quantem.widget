@@ -3,7 +3,7 @@ show4dstem: Fast interactive 4D-STEM viewer widget.
 
 The public factory routes Apple chunk-backed loads to the MPS Metal viewer. This
 base viewer keeps CUDA CuPy inputs resident so ``quantem.gpu`` can use its
-RawKernel virtual-image reducers; Torch remains the generic CPU/tensor fallback.
+RawKernel virtual-image reducers. NumPy inputs remain useful for small UI tests.
 
 To reduce data size, bin k-space at the dataset level before viewing:
 
@@ -72,9 +72,9 @@ def _h5_bad_pixel_json_for_export(url: str, base_dir: pathlib.Path) -> str | Non
     if path is None or not path.exists():
         return None
     try:
-        from quantem.gpu.io.hdf5 import read_pixel_mask
+        from quantem.gpu.io import inspect
 
-        mask = read_pixel_mask(path)
+        mask = inspect(path).pixel_mask
     except Exception:
         return None
     if mask is None:
@@ -89,6 +89,9 @@ def _show4dstem_h5_webgpu_tuning(*, dtype: str, h5_uint8_lossless: bool) -> str:
     low8 = "true" if h5_uint8_lossless else "false"
     return (
         "<script>\n"
+        "if (globalThis.location?.protocol === \"file:\") {\n"
+        "  globalThis.__QT_REQUIRE_LOCAL_H5_FILES = true;\n"
+        "}\n"
         f'globalThis.__QT_H5_DECODE_DTYPE ??= "{decode_dtype}";\n'
         f"globalThis.__QT_H5_FORCE_LOW8 ??= {low8};\n"
         f"globalThis.__BSLZ4_LOW8_ONLY ??= {low8};\n"
@@ -111,7 +114,12 @@ def _inject_show4dstem_h5_webgpu_tuning(
 ) -> None:
     """Inject HDF5 WebGPU runtime settings into an exported HTML page."""
     text = path.read_text(encoding="utf-8")
-    if "__QT_H5_DECODE_DTYPE" in text and "__BSLZ4_PIPELINE_STAGING" in text:
+    has_runtime_tuning = (
+        "__QT_H5_DECODE_DTYPE" in text
+        and "__BSLZ4_PIPELINE_STAGING" in text
+    )
+    has_file_guard = "__QT_REQUIRE_LOCAL_H5_FILES = true" in text
+    if has_runtime_tuning and has_file_guard:
         return
     script = _show4dstem_h5_webgpu_tuning(
         dtype=dtype,
@@ -122,56 +130,6 @@ def _inject_show4dstem_h5_webgpu_tuning(
     else:
         text = script + text
     path.write_text(text, encoding="utf-8")
-
-
-class _NumpyShow4DSTEMComputeBackend:
-    """Small CPU fallback for local array viewers without ``quantem.gpu``."""
-
-    def __init__(self, data: Any):
-        self.data = to_numpy(data)
-
-    def _flat(self) -> np.ndarray:
-        arr = np.asarray(self.data)
-        if arr.ndim < 3:
-            raise ValueError(
-                "Show4DSTEM compute data must have detector dimensions in the last two axes."
-            )
-        return arr.reshape((-1, arr.shape[-2], arr.shape[-1]))
-
-    def mean_dp(self) -> np.ndarray:
-        arr = np.asarray(self.data)
-        if arr.ndim == 2:
-            return arr.astype(np.float32, copy=False)
-        axes = tuple(range(arr.ndim - 2))
-        return arr.mean(axis=axes, dtype=np.float64).astype(np.float32, copy=False)
-
-    def frame(self, idx: int) -> np.ndarray:
-        flat = self._flat()
-        index = max(0, min(int(idx), flat.shape[0] - 1))
-        return flat[index]
-
-    def reduce_frames(self, indices: Sequence[int], reduce: str = "mean") -> np.ndarray:
-        flat = self._flat()
-        if len(indices) == 0:
-            return np.zeros(flat.shape[1:], dtype=np.float32)
-        safe = np.clip(np.asarray(indices, dtype=np.int64), 0, flat.shape[0] - 1)
-        selected = flat[safe]
-        mode = (reduce or "mean").lower()
-        if mode == "sum":
-            return selected.sum(axis=0, dtype=np.float64).astype(np.float32, copy=False)
-        if mode == "max":
-            return selected.max(axis=0).astype(np.float32, copy=False)
-        return selected.mean(axis=0, dtype=np.float64).astype(np.float32, copy=False)
-
-    def masked_sum(self, mask: np.ndarray) -> np.ndarray:
-        arr = np.asarray(self.data)
-        mask_arr = np.asarray(mask, dtype=np.float32)
-        if arr.shape[-2:] != mask_arr.shape:
-            raise ValueError(
-                f"Mask shape {mask_arr.shape} does not match detector shape {arr.shape[-2:]}."
-            )
-        out = (arr.astype(np.float32, copy=False) * mask_arr).sum(axis=(-2, -1))
-        return np.asarray(out, dtype=np.float32)
 
 
 def _is_recoverable_allocation_error(exc: BaseException) -> bool:
@@ -253,8 +211,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         Scientific layout mode. ``"single"`` shows one selected frame/dataset.
         ``"multiple"`` shows a grid of virtual images for the first ready
         frames/datasets while sharing the detector ROI and scan cursor with the
-        existing diffraction panel. Legacy aliases ``"temporal"`` and
-        ``"compare"`` are accepted as ``"single"`` and ``"multiple"``.
+        existing diffraction panel.
     compare_layout : {"side", "top"}, default "side"
         Frontend layout hint for ``view_mode="multiple"``. The current widget
         renders ``"side"`` as the default shared-DP plus virtual-image grid.
@@ -323,10 +280,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     >>> Show4DSTEM(np.random.rand(64, 64, 128, 128))
 
-    PyTorch tensor (CPU or GPU):
+    PyTorch CUDA tensor:
 
     >>> import torch
-    >>> Show4DSTEM(torch.rand(64, 64, 128, 128))
+    >>> Show4DSTEM(torch.rand(64, 64, 128, 128, device="cuda"))
 
     With explicit calibration (real-space Å, k-space mrad):
 
@@ -466,9 +423,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     # multi-volume {volumes:[{base,chunks,badPx}], ...}. The browser decode is
     # bit-exact to the uint8-clipped reference (verified).
     _offline_bslz4 = traitlets.Unicode("").tag(sync=True)
-    # Browser-source mode: normal CLI exports point at lazy sidecars plus
-    # sibling HDF5 files for on-demand byte-range frame reads. The legacy H5
-    # source fields remain for compatibility and focused debug tests.
+    # Browser-source mode: normal CLI exports point at sibling HDF5 files for
+    # on-demand byte-range frame reads.
     _h5_url = traitlets.Unicode("").tag(sync=True)
     _h5_urls = traitlets.Unicode("").tag(sync=True)
     _h5_uint8_lossless = traitlets.Bool(False).tag(sync=True)
@@ -693,10 +649,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     @staticmethod
     def _normalise_view_mode(value: str) -> str:
         mode = str(value or "single").strip().lower().replace("-", "_")
-        if mode in {"default", "normal", "temporal"}:
-            mode = "single"
-        elif mode in {"compare", "multi"}:
-            mode = "multiple"
         if mode not in {"single", "multiple"}:
             raise ValueError(f"view_mode must be 'single' or 'multiple', got {value!r}")
         return mode
@@ -737,6 +689,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 f"compare_group_mode must be 'paged' or 'all', got {value!r}"
             )
         return mode
+
+    def _multiple_view_active(self) -> bool:
+        """Return True when the multiple-panel virtual-image surface is visible."""
+        return self.view_mode == "multiple" and self.n_frames > 1
 
     @staticmethod
     def _normalise_vi_source(value: str | None) -> str:
@@ -1034,8 +990,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         frame = self._frame_data
         if hasattr(frame, "chunks") or getattr(frame, "_is_gpu_frames", False):
             raise ValueError(
-                "Compute SSB from Show4DSTEM currently requires a resident CUDA, "
-                "CuPy, NumPy, or CPU Torch 4D frame. For MPS/chunked data, "
+                "Compute SSB from Show4DSTEM currently requires a resident CUDA "
+                "or CuPy 4D frame. For MPS/chunked data, "
                 "precompute SSB separately and pass SSB=phase_map."
             )
         if isinstance(frame, torch.Tensor):
@@ -1046,9 +1002,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     device_index = torch.cuda.current_device()
                 with cp.cuda.Device(int(device_index)):
                     return cp.from_dlpack(owner), owner
-            if frame.device.type == "cpu":
-                arr = frame.detach().contiguous().numpy()
-                return cp.asarray(arr), arr
             raise ValueError(
                 f"Compute SSB requires CUDA/CuPy; got Torch device {frame.device}."
             )
@@ -1056,8 +1009,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if type(frame).__module__.split(".", 1)[0] == "cupy":
             return cp.asarray(frame), frame
 
-        arr = np.asarray(to_numpy(frame))
-        return cp.asarray(arr), arr
+        raise ValueError(
+            "Compute SSB requires a CUDA tensor or CuPy array; CPU transfer is "
+            "not a scientific fallback."
+        )
 
     def _compute_ssb_phase(
         self,
@@ -1320,7 +1275,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             phase_np = np.asarray(phase, dtype=np.float32)
             # DPC comes for free here: the 4D frame is already resident on the
             # GPU, so CoM row/col is two cheap reductions. Align with the SSB
-            # scan rotation so the maps match quantem.live's dpc_com_*_aligned.
+            # scan rotation so the maps follow the shared aligned-DPC convention.
             from quantem.gpu.dpc import center_of_mass
             com_k_row, com_k_col = center_of_mass(
                 data_gpu, scan_shape=(self.shape_rows, self.shape_cols)
@@ -1534,23 +1489,14 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         self.compare_max_panels = compare_max_panels
         self.compare_group_mode = self._normalise_compare_group_mode(compare_group_mode)
-        # Backend selector. ONLY two values:
-        #   None  -> auto-pick Python compute (TorchBackend on torch
-        #            tensors, MetalRawBackend on ChunkedFrames). Default.
-        #   'web' -> kernel ships a packed stack via _offline_stack
-        #            trait; JS Show4DSTEMCompute does all reductions in
-        #            browser WebGPU. Kernel stays alive. Universal GPU
-        #            compute (any modern GPU).
-        # Legacy aliases (kept for one release):
-        #   - 'browser' / 'webgpu' -> same as 'web'
-        #   - offline=True          -> same as backend='web'
-        if backend in ("web", "browser", "webgpu"):
+        # ``webgpu`` moves detector reductions into the browser. Native CUDA
+        # and MPS are inferred from the typed data payload.
+        if backend == "webgpu":
             offline = True  # routes the rest of __init__ through the offline pack path
         elif backend is not None:
             raise ValueError(
-                f"backend must be 'web' or None, got {backend!r}. "
-                f"Python compute backend is auto-selected from the data type "
-                f"(torch tensor -> TorchBackend; ChunkedFrames -> MetalRawBackend)."
+                f"backend must be 'webgpu' or None, got {backend!r}. "
+                "Native CUDA or MPS compute is selected from the data payload."
             )
         self._backend_choice = backend
         offline_dtype = str(offline_dtype).strip().lower().replace("_", "")
@@ -1592,10 +1538,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     "Show4DSTEM(..., h5_urls=... or lazy_url/lazy_urls=...) "
                     "requires detector_shape=(rows, cols)."
                 )
-            if backend not in (None, "web", "browser", "webgpu"):
+            if backend not in (None, "webgpu"):
                 raise ValueError(
                     "Browser-source Show4DSTEM uses WebGPU; backend must be "
-                    f"'webgpu'/'web' or None, got {backend!r}."
+                    f"'webgpu' or None, got {backend!r}."
                 )
             offline = True
             backend = "webgpu"
@@ -1703,9 +1649,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._path_points: list[tuple[int, int]] = []
         # Suppress per-trait recompute during apply_preset batch writes
         self._suppress_roi_recompute = False
-        # Accept the io.load(...) output directly so `Show4DSTEM(load(path))` just
-        # works on any backend. Unwrap a LoadResult NamedTuple, then wrap a raw MPS
-        # chunked-load (MPSChunked4DSTEM) for the Metal compute path.
+        # The public factory unwraps LoadResult explicitly. This implementation
+        # receives the typed GPU data payload.
         self._webgpu_h5_source = bool(webgpu_source_count)
         self._cuda_compute_data = None
         self._cuda_compare_compute_backends: OrderedDict[int, Any] = OrderedDict()
@@ -1725,8 +1670,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 else (rows, cols, det_r, det_c)
             )
         else:
-            if hasattr(data, "_fields") and "data" in getattr(data, "_fields", ()):
-                data = data.data
             # Dataset5dstem is the CUDA/MPS-friendly 5D series wrapper. Keep it as a
             # frame-backed object instead of calling `.tensor`: sharded CUDA series may
             # hold each 18 GiB no-bin master on a different GPU, and `.tensor` would
@@ -1734,12 +1677,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             is_dataset5dstem = type(data).__name__ == "Dataset5dstem" and hasattr(
                 data, "frame"
             )
-            if hasattr(data, "chunks") and not getattr(data, "_is_gpu_frames", False):
-                from quantem.gpu.compute.mps import ChunkedFrames
-
-                data = ChunkedFrames(
-                    data, row_prefix=bool(getattr(data, "row_prefix", False))
-                )
             # cupy array (io.load default on CUDA) -> ZERO-COPY torch tensor on the same
             # GPU via dlpack. Without this, the fallback cp.asnumpy round-trips the whole
             # block to CPU and re-uploads (a 19.3 GB no-bin load -> ~58 GB transient and
@@ -1986,7 +1923,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self._compare_page_fresh_indices = set()
             self._compare_page_working_images = {}
             self._compare_page_paint_clients = set()
-            self._compare_page_paint_legacy_active = False
             self._compare_page_paint_ack_enabled = False
             self._folder_update_page_idx = -1
             self._folder_update_expected_indices = ()
@@ -2010,7 +1946,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             ).tobytes()
             visible_count = (
                 min(int(self.n_frames), max(1, int(compare_max_panels)))
-                if self.view_mode == "multiple"
+                if self._multiple_view_active()
                 else 0
             )
             if visible_count:
@@ -2121,7 +2057,6 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._compare_page_fresh_indices: set[int] = set()
         self._compare_page_working_images: dict[int, np.ndarray] = {}
         self._compare_page_paint_clients: set[str] = set()
-        self._compare_page_paint_legacy_active = False
         self._compare_page_paint_ack_enabled = False
         self._folder_update_page_idx = -1
         self._folder_update_expected_indices: tuple[int, ...] = ()
@@ -2290,11 +2225,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             # compute class first (raw Metal / cupy), else the torch device.
             cls = self._compute.__class__.__name__
             backend, where = {
-                "MetalCompute": ("Apple GPU (raw Metal)", "Apple unified memory"),
                 "MetalRawBackend": ("Apple GPU (raw Metal)", "Apple unified memory"),
                 "CudaKernelCompute": ("NVIDIA GPU (CUDA, cupy)", "GPU VRAM"),
             }.get(cls, (None, None))
-            if backend is None:  # TorchCompute — backend depends on the torch device
+            if backend is None:  # TorchBackend depends on the torch device
                 dev = str(self._device)
                 if "cuda" in dev:
                     backend, where = "NVIDIA GPU (CUDA, torch)", "GPU VRAM"
@@ -2378,8 +2312,8 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if self._data.ndim not in (4, 5):
             return
         # Browser-source mode: the raw frames stay as files on disk and WebGPU
-        # reads either the legacy source or the lazy sidecar/frame ranges at
-        # runtime. Do not pack/embed data for these browser-source paths.
+        # reads HDF5 byte ranges or an explicitly supplied internal lazy source
+        # at runtime. Do not pack/embed data for these browser-source paths.
         if (
             getattr(self, "_h5_url", "")
             or getattr(self, "_h5_urls", "")
@@ -2898,7 +2832,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _clone_for_html_export(
         self, *, dtype: str, det_bin: int, scan_bin: int = 1
-    ) -> Self:
+    ) -> "Show4DSTEM":
         data = self._export_data_array(dtype=dtype, det_bin=det_bin, scan_bin=scan_bin)
         k_scale = float(det_bin)
         scan_scale = float(scan_bin)
@@ -2916,7 +2850,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             if self.vi_source == "roi" or self.vi_source in product_kwargs
             else "roi"
         )
-        clone = type(self)(
+        # Export data is a compact tensor, so always use the universal base
+        # viewer. Backend-specific subclasses require their native storage
+        # handles and must not be reconstructed from this tensor payload.
+        clone = Show4DSTEM(
             data,
             sampling=sampling,
             units=units,
@@ -3533,8 +3470,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         ]
         if not to_release:
             return
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         try:
             data.release(idx=to_release)
         finally:
@@ -4115,8 +4051,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         )
         # Every holder of the data storage (verified via a gc storage scan):
         # the widget's own ref, the compute backend's view cache, and the per-op cache.
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         if type(data).__name__ == "Dataset5dstem" and hasattr(data, "free"):
             data.free()
         self._data = None
@@ -4267,34 +4202,25 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     @property
     def _compute(self):
-        """UI-agnostic Python compute backend for the CURRENT frame's data,
-        rebuilt when the frame changes. Two families:
-
-        * ``TorchBackend`` — torch tensor on CUDA / MPS / CPU (universal default).
-        * ``MetalRawBackend`` — chunk-backed Metal frames (a 19 GB no-bin
-          stack where torch.MPS overflows).
-
-        ``backend='web'`` does NOT install a third Python backend; it sets
-        ``offline=True`` so the kernel ships a uint8-packed stack to the browser
-        and the JS ``Show4DSTEMCompute`` does all reductions in WebGPU. The
-        Python ``_compute`` stays a Torch/MetalRaw backend for any kernel-side
-        fallbacks (e.g. ``_pack_offline`` initial compute, snapshot PNG).
-
-        Construction is cheap (views, no copy) so the backend rebuilds when
-        ``_frame_data`` changes (5D time-series scrub).
-        """
+        """Return the current frame's GPU detector session."""
         fd = self._compute_frame_data
         if getattr(self, "_compute_for", None) is not fd:
-            try:
-                from quantem.gpu.compute.backends import compute_backend
-            except ModuleNotFoundError as exc:
-                if exc.name != "quantem.gpu":
-                    raise
-                self._compute_backend = _NumpyShow4DSTEMComputeBackend(fd)
-            else:
-                self._compute_backend = compute_backend(fd)
+            from quantem.gpu.detector import prepare
+
+            previous = getattr(self, "_compute_backend", None)
+            if previous is not None:
+                previous.close()
+            self._compute_backend = prepare(fd)
             self._compute_for = fd
         return self._compute_backend
+
+    def _close_compute(self) -> None:
+        """Close the current detector session before releasing its data."""
+        session = getattr(self, "_compute_backend", None)
+        if session is not None:
+            session.close()
+        self._compute_backend = None
+        self._compute_for = None
 
     # =========================================================================
     # Line Profile
@@ -4556,9 +4482,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         progressive = self._uses_progressive_compare_pages()
         self._refresh_compare_virtual_images()
-        if self.view_mode == "multiple":
+        if self._multiple_view_active():
             # A page change normally moves the selected diffraction panel to
-            # the first visible slot. Suppress that observer's legacy eager
+            # the first visible slot. Suppress that observer's direct eager
             # frame load while a folder page is being streamed in the worker.
             self._suppress_progressive_frame_update = progressive
             try:
@@ -4577,7 +4503,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             self.compare_dp_mode = self._normalise_compare_dp_mode(
                 change.get("new", "average")
             )
-        if self.view_mode == "multiple":
+        if self._multiple_view_active():
             self._update_frame()
 
     def _on_frame_idx_change(self, change=None):
@@ -4593,7 +4519,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         self._cached_abf_virtual = None
         self._cached_adf_virtual = None
         self._cached_haadf_virtual = None
-        if self.view_mode == "multiple":
+        if self._multiple_view_active():
             self._sync_compare_page_to_frame_idx()
             if getattr(self, "_suppress_progressive_frame_update", False) or (
                 self._uses_progressive_compare_pages()
@@ -4603,7 +4529,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         # Recompute virtual image only when it is visible. In multiple mode the
         # visible virtual-image surface is the compare grid; switching back to
         # single recomputes the per-frame virtual image in _on_compare_config_change.
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._update_frame()
         # Recompute reduced DP if VI ROI is active
@@ -4813,15 +4739,15 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         >>> widget.auto_detect_center()  # Auto-detect and apply
         """
         # Sum diffraction patterns over scan positions to find BF disk centroid.
-        # Chunked torch INTEGER path: works identically on CUDA / MPS / CPU.
+        # Chunked torch integer reference path used by small tests.
         # int64 accumulator, no float32 cast of the stack — keeps the data in its
         # native dtype (a float32 cast doubles memory and is lossy above 2^24),
         # is bit-exact, and avoids the MPS "tensor dims larger than INT_MAX"
         # error a single full-stack reduce hits once positions*det > 2^31 (a bin2
         # 512x512x96x96 stack = 2.42e9 elements). The chunk cap keeps each op's
         # element count well under 2^31; the (det, det) accumulator is tiny.
-        # Mean DP over all scan positions via the compute backend (TorchCompute
-        # int64-accumulates in chunks; MetalCompute uses the raw detector_sum
+        # Mean DP over all scan positions via the compute backend (TorchBackend
+        # int64-accumulates in chunks; MetalRawBackend uses the raw detector_sum
         # kernel). Centroid + radius are scale-invariant, so mean vs sum is the
         # same center/radius. The (det, det) result is tiny - torch for the centroid.
         mean_dp = torch.as_tensor(self._compute.mean_dp(), device=self._device).float()
@@ -5639,7 +5565,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         finally:
             self._suppress_roi_recompute = False
         # Single recompute with final, consistent state.
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
         return self
@@ -5976,7 +5902,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         if self.vi_source != "roi":
             return
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
 
@@ -6003,7 +5929,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         if self.vi_source != "roi":
             return
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             self._compute_virtual_image_from_roi()
         self._refresh_compare_virtual_images()
 
@@ -6018,7 +5944,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
 
         if source == "roi":
-            if self.view_mode != "multiple":
+            if not self._multiple_view_active():
                 self._compute_virtual_image_from_roi()
             self._refresh_compare_virtual_images()
             return
@@ -6571,10 +6497,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                 return
             active = bool(content.get("active", True))
             client_id = content.get("client_id")
-            if client_id is None:
-                # Compatibility with frontend bundles predating per-view IDs.
-                self._compare_page_paint_legacy_active = active
-            elif (
+            if (
                 isinstance(client_id, str)
                 and bool(client_id)
                 and len(client_id) <= 128
@@ -6586,8 +6509,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             else:
                 return
             self._compare_page_paint_ack_enabled = bool(
-                self._compare_page_paint_legacy_active
-                or self._compare_page_paint_clients
+                self._compare_page_paint_clients
             )
             if not self._compare_page_paint_ack_enabled and bool(
                 getattr(self, "_folder_update_pending", False)
@@ -6858,7 +6780,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
         if type(getattr(self, "_data", None)).__name__ != "Dataset5dstem":
             raise RuntimeError("poll_folder() requires a lazy Dataset5dstem backing.")
-        from quantem.widget.io import discover_masters, inspect_master_readiness
+        from quantem.gpu import io as gpu_io
 
         poll_lock = getattr(self, "_folder_poll_lock", None)
         if poll_lock is None:
@@ -6879,7 +6801,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                     # Do not pre-filter on frame count: incomplete candidates must
                     # stay visible to the readiness protocol so users see why a
                     # matching master has not appeared yet.
-                    masters = discover_masters(
+                    masters = gpu_io.discover(
                         str(source["folder"]),
                         pattern=source["pattern"],
                         recursive=source["recursive"],
@@ -6917,7 +6839,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
                         continue
 
                     try:
-                        report = inspect_master_readiness(
+                        report = gpu_io.inspect(
                             master,
                             scan_shape=source["scan_shape"],
                         )
@@ -7374,8 +7296,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         # Drop compute views first; they may be the last reference to a frame that
         # is about to become a cold lazy slot.
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         try:
             released = data.release(idx=list(panels))
         except Exception:
@@ -7590,12 +7511,12 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
 
     def _virtual_image_for_chunked_dataset(self, dataset, mask) -> np.ndarray:
         """Compute one compare tile for a chunked MPS dataset slot."""
-        from quantem.gpu.compute.backends import compute_backend
+        from quantem.gpu.detector import prepare
 
         mask_np = (
             mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
         )
-        backend = compute_backend(dataset)
+        backend = prepare(dataset)
         return np.asarray(backend.masked_sum(mask_np), dtype=np.float32)
 
     def _cuda_compare_backend_for_index(self, idx: int):
@@ -7610,10 +7531,10 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             cache.move_to_end(key)
             return backend
 
-        from quantem.gpu.compute.backends import compute_backend
+        from quantem.gpu.detector import prepare
 
         frame = cuda_data[key] if self.n_frames > 1 else cuda_data
-        backend = compute_backend(frame)
+        backend = prepare(frame)
         cache[key] = backend
         max_entries = max(1, int(getattr(self, "compare_max_panels", 1)) * 2)
         while len(cache) > max_entries:
@@ -7635,8 +7556,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             return
         # Drop cached compute views before the backing series releases old page
         # frames. Otherwise _compute_for can keep an evicted 18 GB frame alive.
-        self._compute_backend = None
-        self._compute_for = None
+        self._close_compute()
         try:
             data.preload([int(idx) for idx in indices])
         except AttributeError:
@@ -8018,7 +7938,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
             )
             and type(data).__name__ == "Dataset5dstem"
             and getattr(data, "is_lazy", False)
-            and self.view_mode == "multiple"
+            and self._multiple_view_active()
         )
 
     def _compare_page_request_is_current(
@@ -9053,7 +8973,7 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
         if getattr(self, "_data", None) is None:
             self._clear_compare_virtual_images()
             return
-        if self.view_mode != "multiple":
+        if not self._multiple_view_active():
             if self.compare_panel_count or self.compare_virtual_image_bytes:
                 self._clear_compare_virtual_images()
             return
@@ -9821,9 +9741,9 @@ class Show4DSTEM(StaticFallbackMixin, anywidget.AnyWidget):
     def _fast_masked_sum(self, mask) -> np.ndarray:
         """Virtual image: sum data over scan positions weighted by a detector mask.
 
-        Delegates to the compute backend (TorchCompute chunked tensordot on any
-        torch device, MetalCompute raw kernel on chunk-backed Metal frames) so the
-        widget runs identically on CUDA / MPS / CPU and on the MacBook fast path.
+        Delegates to the compute backend (TorchBackend chunked tensordot on any
+        torch device, MetalRawBackend raw kernel on chunk-backed Metal frames) so the
+        widget follows the same detector geometry across CUDA, MPS, and test references.
         Returns numpy (scan_r, scan_c) float32; the only consumer is
         `_to_float32_bytes`. Verified bit-identical to the old inline tensordot
         (tests/kernels/test_backend_parity.py + frozen widget baseline)."""

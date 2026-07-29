@@ -52,7 +52,8 @@ ShowFolder("/data/session")
 ## Load data
 
 ```python
-from quantem.widget import ShowEDS, Show4DSTEM, load, load_eds
+from quantem.gpu.io import load
+from quantem.widget import ShowEDS, Show4DSTEM, load_eds
 
 data = load("scan_master.h5")   # Arina 4D-STEM .h5 -> GPU
 Show4DSTEM(data)
@@ -79,7 +80,7 @@ see the docs.
 ## Command line
 
 Point `quantem` at a file or folder and it renders the right viewer - no notebook, no
-Python. Installing the package adds the `quantem` command (and a short `qw` alias).
+Python. Installing the package adds the `quantem` command.
 
 ```bash
 quantem show ./anything/                     # auto-detect content, pick the viewer
@@ -89,8 +90,9 @@ quantem show2d ./frames/ --watch             # live folder         -> append new
 quantem show4dstem ./masters/                # *_master.h5         -> live Show4DSTEM
 quantem show4dstem a_master.h5 b_master.h5   # several masters     -> one 5D multi-tilt viewer
 quantem show4dstem ./masters/ --html         # 4D-STEM             -> shareable offline HTML
+quantem showptycho scan_master.h5            # raw 4D-STEM master  -> user-owned review project
+quantem showptycho ./ptycho-export/          # existing project    -> WebGPU browser review
 quantem showfolder ./session/                # microscopy folder   -> ShowFolder notebook/HTML
-quantem data-transfer plan ./raw/ /ssd0/run /ssd1/run --manifest run.json
 quantem html tutorial.ipynb                  # a notebook          -> standalone offline HTML
 ```
 
@@ -100,19 +102,20 @@ quantem html tutorial.ipynb                  # a notebook          -> standalone
 | `quantem show2d <img / folder>` | one image, or a folder | Show2D HTML (a folder becomes a gallery); with `--watch`, a live ShowFolder notebook |
 | `quantem show3d <folder>` | a folder of same-size frames | Show3D scrub HTML; with `--watch`, a live ShowFolder notebook |
 | `quantem show4dstem <master(s) / folder>` | one or more `*_master.h5` | live Show4DSTEM notebook (or `--html`) |
+| `quantem showptycho <master(s) / folder>` | one or more `*_master.h5`, or an existing project | one index with direct ShowPtycho and Show4DSTEM browser viewers |
 | `quantem showfolder <folder>` | microscopy session folder | ShowFolder notebook (or `--html`) |
-| `quantem data-transfer plan/inspect/copy/update/masters/show4dstem` | `*_master.h5` folder plus target roots | manifest-backed transfer planning, state inspection, explicit copy, resume/update, ready-master listing, and Show4DSTEM handoff |
 | `quantem html <notebook.ipynb>` | a notebook you wrote | runs it, bakes outputs into one offline HTML |
 | `quantem github <notebook.ipynb>` | a notebook copy for GitHub | strips widget state, embeds compressed pictures for GitHub's preview |
 
 **Images** save a standalone HTML and open in your browser. **4D-STEM** opens a live,
 kernel-backed notebook by default (full detector sampling and real-time interaction);
-`--html` instead writes an offline WebGPU browser export - drag detectors, switch
+`--html` instead writes an offline WebGPU browser folder - drag detectors, switch
 BF/ABF/ADF, pan diffraction, all with no kernel. Use `--bin N` only when you
-explicitly want a detector-binned preview. Interactive raw 4D exports may include a
-`Show4DSTEM.command` launcher when the browser must fetch a companion data payload
-over HTTP. Several masters (a folder, or listed explicitly) stack into one 5D viewer
-with a dataset slider (the multi-tilt case).
+explicitly want a detector-binned preview. Full-detector WebGPU exports keep the
+compressed HDF5 files next to the viewer; open `index.html` and grant the data
+folder, or double-click `Show4DSTEM.command` to serve the same folder locally.
+Several masters (a folder, or listed explicitly) stack into one 5D viewer with a
+dataset slider (the multi-tilt case).
 
 For live microscope sessions, keep the Show4DSTEM viewer mounted and append new
 completed `*_master.h5` acquisitions into the same dataset slider. On Apple
@@ -131,15 +134,18 @@ For GitHub notebook previews, make a copy and run
 this command keeps compressed pictures of each widget UI and removes heavy widget state.
 See the HTML export docs for the widget capability table and folder-export guidance.
 
-Everything lands in `~/Downloads` (or the current directory on machines without
-one) and opens automatically on a desktop.
+Image and Show4DSTEM outputs land in `~/Downloads` by default. ShowPtycho
+projects land in `~/QuantEM/showptycho/<acquisition>` so a shared or read-only
+acquisition is never used as an implicit output directory. Pass `--out` for a
+specific project location or `--in-place` to opt into
+`SOURCE/quantem/showptycho`.
 
 | Option | Effect |
 |---|---|
-| `--bin N` | detector mean-bin factor for 4D-STEM (default 1: full detector sampling) |
+| `--bin N` | detector mean-bin factor for Show4DSTEM (default 1: full detector sampling); ShowPtycho always uses native detector sampling |
 | `--dtype uint8/uint16` | 4D-STEM HTML export dtype; `uint8` is compact browse, `uint16` keeps the wider detector-count range |
 | `--html` | 4D-STEM: write the offline-WebGPU HTML instead of a notebook |
-| `--backend auto/cuda/mps/cpu/webgpu` | Show4DSTEM backend; use `webgpu` with `--html` |
+| `--backend auto/cuda/mps/webgpu` | Show4DSTEM backend; use `webgpu` with `--html` |
 | `--count N` | Show4DSTEM: require and load this many compatible masters from the input |
 | `--devices 0,1` | Show4DSTEM CUDA placement; alias of `--gpus` |
 | `--watch` | show2d/show3d/show4dstem folders: keep appending new files to a live notebook |
@@ -148,9 +154,9 @@ one) and opens automatically on a desktop.
 | `--no-open` | write the file(s) without launching a browser or Jupyter |
 | `--title`, `-v/--verbose` | page title; verbose progress |
 
-Runs on CUDA, Apple Silicon (MPS), CPU, or browser WebGPU. On a MacBook,
+Runs on CUDA, Apple Silicon (MPS), or browser WebGPU. On a MacBook,
 `quantem show4dstem ./masters/ --backend webgpu --html --count 1` writes a
-double-clickable lazy WebGPU browser folder without copying raw data.
+double-clickable HDF5-backed WebGPU browser folder without copying raw data.
 
 ## Show4DSTEM export quick reference
 
@@ -159,8 +165,8 @@ Most users want one of these paths:
 | Goal | Use this | Result |
 |---|---|---|
 | Keep working interactively in Python | `quantem show4dstem ./masters/` or `Show4DSTEM(load(...))` | Live notebook, kernel-backed CUDA/MPS interaction |
-| Share a compact screening result | `widget.export_html(..., export_kind="report")` | One self-contained HTML report; PNG virtual-image pages; no raw 4D payload |
-| Share an offline browser widget | `widget.export_html(..., export_kind="interactive", dtype="uint8", scan_bin=2, det_bin=4)` | WebGPU HTML that can still drag detector ROIs, but embeds binned raw 4D data |
+| Share a compact review result | `widget.export_html(..., export_kind="report")` | One self-contained HTML report; PNG virtual-image pages; no raw 4D payload |
+| Share a small offline raw-4D widget | `widget.export_html(..., export_kind="interactive", dtype="uint8", scan_bin=2, det_bin=4)` | WebGPU HTML that can still drag detector ROIs, but embeds an explicitly reduced raw 4D payload |
 | Open directly from the terminal | `quantem show4dstem ./masters/ --backend webgpu --html --count 1` | Browser WebGPU export built from source H5 masters |
 | Open full native detector sampling from the terminal | `quantem show4dstem ./masters/ --backend webgpu --html --count 7 --bin 1 --dtype uint8` | No-notebook WebGPU export with native detector sampling |
 
@@ -189,7 +195,8 @@ viewer.export_html(
 ```
 
 Use **interactive raw 4D export** only when the recipient must keep dragging the
-detector ROI offline:
+detector ROI offline and the embedded raw payload is intentionally small enough
+to share:
 
 ```python
 viewer.export_html(
@@ -205,7 +212,7 @@ For users who do not want a notebook and want native detector sampling, use the
 CLI full path:
 
 ```bash
-quantem show4dstem /data/session --html --bin 1 --dtype uint16 --out ~/Downloads
+quantem show4dstem /data/session --backend webgpu --html --bin 1 --dtype uint16 --out ~/Downloads
 ```
 
 Both `scan_bin` and `det_bin` are explicit mean-binning choices for the export.
@@ -252,11 +259,11 @@ nonzero-aperture BF pixels after the BF policy is applied.
 | Scan | Active BF | Typical use | Old n x n baseline (not runtime) | Exact default | Fast preview |
 |---|---:|---|---:|---:|---:|
 | 512x512 | 12 | Small smoke test | 25 MB | 13 MB | 6.3 MB |
-| 512x512 | 408 | 0.30 BF preview in the Phil report | 856 MB | 429 MB | 215 MB |
+| 512x512 | 408 | 0.30 BF preview in the reference report | 856 MB | 429 MB | 215 MB |
 | 512x512 | 1360 | Full-BF estimate for the sparse experimental 512 dataset | 2.85 GB | 1.43 GB | 0.72 GB |
 | 512x512 | 9070 | Dense experimental full active BF | 19.0 GB | 9.55 GB | 4.77 GB |
 | 1024x1024 | 12 | Small smoke test | 101 MB | 50 MB | 25 MB |
-| 1024x1024 | 1382 | Berk full active BF | 11.6 GB | 5.81 GB | 2.90 GB |
+| 1024x1024 | 1382 | Reference full active BF | 11.6 GB | 5.81 GB | 2.90 GB |
 | 1024x1024 | 9070 | Workstation stress projection | 76.1 GB | 38.1 GB | 19.1 GB |
 
 ## Docs

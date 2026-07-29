@@ -64,6 +64,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # npm run build (inside the signoff) syncs the WebGPU engine sources from
+      # quantem.gpu; the TestPyPI release can lag the webgpu module, so install
+      # quantem.gpu from its source tip (below) after the TestPyPI deps.
+      - uses: actions/checkout@v7
+        with:
+          repository: bobleesj/quantem.gpu
+          path: quantem-gpu-src
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -82,6 +90,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r docs/requirements.txt
           python -m pip install --extra-index-url https://test.pypi.org/simple/ -e ".[test,hub]" huggingface_hub h5py tifffile
+          python -m pip install ./quantem-gpu-src
 
       - name: Cache Hugging Face tutorial data
         uses: actions/cache@v4
@@ -96,6 +105,8 @@ jobs:
         env:
           # Silence the HF "unauthenticated requests" warning in baked outputs.
           HF_HUB_VERBOSITY: error
+          # WebGPU source-sync fallback (see the quantem.gpu checkout above).
+          QUANTEM_GPU_SRC: ${{ github.workspace }}/quantem-gpu-src/src
         run: |
           args=(--artifact-dir /tmp/quantem-widget-ci-signoff)
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then

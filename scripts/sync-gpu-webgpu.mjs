@@ -4,7 +4,7 @@
 // source.
 
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -13,11 +13,34 @@ const repoRoot = path.resolve(scriptDir, "..");
 
 export function syncGpuWebgpuSources({ targetDir = "js/.generated/engine" } = {}) {
   const outputDir = path.isAbsolute(targetDir) ? targetDir : path.join(repoRoot, targetDir);
-  const python = process.env.PYTHON || "python3";
+  const python = process.env.PYTHON || "python";
   const code = `
 import json
-from quantem.gpu import webgpu
-print(json.dumps({name: webgpu.source_text(name) for name in webgpu.source_names()}))
+from importlib.resources import files
+
+names = (
+    "device/webgpu.ts",
+    "io/backends/webgpu/bslz4.ts",
+    "io/backends/webgpu/h5reader.ts",
+    "io/backends/webgpu/local-h5.ts",
+    "detector/compute/webgpu/backend.ts",
+    "dpc/compute/webgpu/fft.ts",
+    "dpc/compute/webgpu/kernels.ts",
+    "ssb/compute/webgpu/backend.ts",
+    "ssb/compute/webgpu/optimizer.ts",
+    "ssb/compute/webgpu/protocol.ts",
+    "ssb/compute/webgpu/kernels/common.ts",
+    "ssb/compute/webgpu/kernels/fft128.ts",
+    "ssb/compute/webgpu/kernels/fft256.ts",
+    "ssb/compute/webgpu/kernels/fft512.ts",
+    "ssb/compute/webgpu/kernels/fft1024.ts",
+    "ssb/compute/webgpu/kernels/index.ts",
+)
+root = files("quantem.gpu")
+print(json.dumps({
+    name: root.joinpath(*name.split("/")).read_text(encoding="utf-8")
+    for name in names
+}))
 `;
   const runExport = (env = process.env) => spawnSync(python, ["-c", code], {
     encoding: "utf8",
@@ -53,11 +76,15 @@ print(json.dumps({name: webgpu.source_text(name) for name in webgpu.source_names
   }
 
   const sources = JSON.parse(result.stdout);
+  // This tree is generated exclusively from the explicit GPU manifest above.
+  // Recreate it so renamed or deleted domain files cannot remain importable.
+  rmSync(outputDir, { recursive: true, force: true });
   mkdirSync(outputDir, { recursive: true });
   let changed = 0;
   let unchanged = 0;
   for (const [name, text] of Object.entries(sources)) {
     const dest = path.join(outputDir, name);
+    mkdirSync(path.dirname(dest), { recursive: true });
     const current = existsSync(dest) ? readFileSync(dest, "utf8") : null;
     if (current === text) {
       unchanged += 1;
@@ -67,7 +94,7 @@ print(json.dumps({name: webgpu.source_text(name) for name in webgpu.source_names
     changed += 1;
   }
   console.log(
-    `synced quantem.gpu.webgpu -> ${targetDir} (${changed} updated, ${unchanged} unchanged)`
+    `synced quantem.gpu WebGPU domains -> ${targetDir} (${changed} updated, ${unchanged} unchanged)`
   );
 }
 

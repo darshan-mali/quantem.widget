@@ -5,7 +5,8 @@ Interactive, GPU-aware Python widgets for electron microscopy, built on
 JupyterLab, VS Code, or Colab.
 
 ```python
-from quantem.widget import Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowPtycho, ShowEDS, ShowDiffraction, ShowFolder, load
+from quantem.gpu.io import load
+from quantem.widget import Show1D, Show2D, Show3D, Show3DSlices, Show4DSTEM, ShowPtycho, ShowEDS, ShowDiffraction, ShowFolder
 ```
 
 ## Quickest start: no notebook needed
@@ -30,22 +31,23 @@ We serve two audiences first:
 - **Linux with NVIDIA CUDA** - workstations and HPC.
 
 **CUDA and MPS are the primary backends.** Work stays on the GPU as PyTorch
-tensors; we avoid NumPy on the hot path. CPU is a fallback, not a target - it
-runs through the same PyTorch path, just slower. For large datasets, bin the
-detector at load (`det_bin`) to cut memory and speed first paint - see
-[Load and I/O](api/io).
+tensors; we avoid NumPy on the hot path. Automatic scientific loading and
+compute never silently fall back to CPU: an unsupported machine fails with a
+corrective error. The explicit CPU reference exists for parity tests, while the
+viewers can still display ordinary NumPy arrays supplied by a user. For large
+datasets, bin the detector at load (`det_bin`) to cut memory and speed first
+paint - see [Load and I/O](api/io).
 
 ## Widgets
 
 | Widget | Use it for | Tutorial · API |
 |---|---|---|
-| `Show1D` | Interactive traces, live reconstruction metrics, line profiles, and linked image snapshots | [tutorial](tutorials/show1d) · [API](api/show1d) |
+| `Show1D` | Interactive traces, live reconstruction metrics, line profiles, and linked image snapshots | [API](api/show1d) |
 | `Show2D` | One or many 2D images: contrast, FFT, ROIs, line profiles, scale bars | [tutorial](tutorials/show2d) · [API](api/show2d) |
 | `Show3D` | A 3D volume scrubbed slice-by-slice (e.g. a ptychographic object) | [tutorial](tutorials/show3d) · [API](api/show3d) |
 | `Show3DSlices` | Side-by-side slices of a 3D volume across an axis | [tutorial](tutorials/show3dslices) · [API](api/show3dslices) |
 | `Show4DSTEM` | 4D-STEM: live virtual detectors, multi-master review, and WebGPU HTML export | [tutorial](tutorials/show4dstem) · [export](tutorials/show4dstem_export) · [API](api/show4dstem) |
 | `ShowPtycho` | Ptychography aberration review: phase, FFT, BF-count tradeoffs, and WebGPU folder export | [API](api/showptycho) |
-| `ShowEDS` | Experimental EDS/EELS spectrum image: linked element map, spectrum, energy band, and ROI | [tutorial](tutorials/showeds) · [API](api/showeds) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
 | `ShowFolder` | Folder-level microscopy browser: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/showfolder) · [API](api/showfolder) |
 
