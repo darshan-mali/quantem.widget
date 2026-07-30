@@ -35,6 +35,19 @@ hardcoding machine-specific paths in shared scripts.
 Use `QUANTEM_WIDGET_BENCH_MASTERS_GLOB` for raw loader benchmarks. It can contain
 multiple `:`-separated globs when a dataset was split across several disks.
 
+## Verification Data
+
+Use reconstructed experimental data for end-to-end widget, browser, visual,
+and performance claims whenever an appropriate dataset is available. Record
+the source description, shape, dtype, transforms, backend, and every crop,
+binning, downsample, or encoding choice in the report. Keep private source
+paths and raw data outside git.
+
+Synthetic data is appropriate for focused unit tests, deterministic failure
+cases, and small CI protocol checks. It does not establish real-workflow or
+real-data performance signoff; label the limitation when synthetic data is the
+only available evidence.
+
 ## Definition Of Done
 
 A widget automation task is done only when:
@@ -227,12 +240,12 @@ timelines. The direct checks prove initial or arrival probation, one unchanged
 follow-up poll, same Python/model identity, `Waiting`/`Updating`/`Watching`/
 `Stopped`, stopped saved/static state without false green, and authoritative
 Show4DSTEM active-page pixels before the final green state. Direct Show4DSTEM
-uses the production CPU loader over tiny external-link masters; the older
+uses the native GPU loader over tiny bitshuffle-LZ4 external-link masters; the older
 ShowFolder-only 4D handoff explicitly labels its monkeypatched tiny loader.
 
 The report writes top-level `exports` rows and `browser-plan.json` in the schema
 accepted by `scripts/widget_browser_smoke.py`. Browser driving remains a
-separate opt-in step; the default lifecycle smoke launches no browser or GPU.
+separate opt-in step; the default lifecycle smoke launches no browser.
 Keep ShowFolder's real cache as numeric arrays for widget handoff. WebP belongs
 in reports, dashboards, and other visual review surfaces, not in the selection
 or data cache.
