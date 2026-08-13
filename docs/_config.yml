@@ -16,6 +16,11 @@ exclude_patterns:
 execute:
   execute_notebooks: "force"
   timeout: 900
+  # Keep the documentation deployable while this tutorial's referenced public
+  # dataset is unavailable. The source page is still published; only its build-
+  # time execution is skipped. Remove this once the public fixture exists.
+  exclude_patterns:
+    - "tutorials/showdiffraction.ipynb"
 
 # Embedded anywidget views need the ipywidgets HTML manager in the static page.
 # myst-nb writes the widget state baked into each notebook; this pulls the JS
@@ -58,9 +63,10 @@ sphinx:
       - Quartz
     suppress_warnings:
       - "etoc.toctree"
-    # In-page Contents sidebar
+    # No in-page Contents sidebar: the pages showcase wide interactive
+    # widgets, so the article column gets every horizontal pixel.
     html_theme_options:
-      secondary_sidebar_items: ["page-toc"]
+      secondary_sidebar_items: []
     html_static_path:
       - "_static"
     html_extra_path:
@@ -68,7 +74,6 @@ sphinx:
     html_css_files:
       - custom.css
     html_js_files:
-      - toc-toggle.js
       # Keeps the mobile hamburger wired across sphinx theme drift; the file
       # is idempotent so double-inclusion via _static auto-add is harmless.
       - nav-toggle-fix.js

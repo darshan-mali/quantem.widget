@@ -1,29 +1,36 @@
+### What problem does it solve?
+
 <!--
-This template mirrors the "Widget PR checklist" in README.md. If you edit one,
-update the other. Links are absolute because relative links do not resolve in
-PR descriptions.
-
-How to use: keep the Core checklist, then expand and complete only the
-sections your change touches. Delete sections that do not apply — a reviewer
-should only see boxes that are relevant to this PR. Either verify each box
-yourself or have a coding agent verify it and check it off for you; mark an
-item that is in a relevant section but does not apply as "n/a — reason".
-
-This PR workflow follows the scientific-software packaging standards described
-in: S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge,
-"Scikit-package - software packaging standards and roadmap for sharing
-reproducible scientific software", Digital Discovery (2026).
-https://doi.org/10.1039/d6dd00121a
+Describe the concrete user or scientific-workflow problem. Explain why the
+change is needed; do not merely summarize the files that changed.
 -->
 
-## Summary
+### What should reviewer(s) do?
 
-<!-- What does this PR change, and why? -->
+<!--
+Give reviewers a short, specific path through the important behavior, files,
+or UI. Include only the actions needed to judge this change.
+-->
+
+### Verification
+
+<!--
+List the checks that actually ran and their results. For UI or scientific
+workflow changes, include the exercised workflow, representative data,
+backend/hardware, and visual or timing evidence when relevant. Omit fields
+that do not apply.
+-->
+
+<!--
+Internal preflight checklist for authors and coding agents. Use every relevant
+item during authoring and review, but do not expose this checklist
+in the rendered PR. Put only the resulting reviewer actions and verification
+evidence in the three visible sections above.
 
 ## Core checklist (every PR)
 
 - [ ] The change includes focused tests for Python state/export behavior and
-  frontend build coverage where possible; start with `PYTHONPATH=src:. pytest -q`
+  frontend build coverage where possible; start with `PYTHONPATH=src pytest -q`
   and `npm run build`, or run `scripts/widget_local_signoff.sh`.
 - [ ] Before committing, inspect `git status --short` and `git diff --stat`;
   do not commit generated HTML, docs builds, screenshots, local notebooks,
@@ -34,8 +41,12 @@ https://doi.org/10.1039/d6dd00121a
   widget state into the published HTML only — never commit a re-executed
   notebook with stored widget state, and never switch the docs build to
   `cache` mode (it silently drops widget state and blanks every widget).
-- [ ] Only the sections below that this PR touches are kept; the rest are
-  deleted from this description.
+  Saving a notebook after running widget cells stores that state silently;
+  strip it before committing:
+  `jq 'del(.metadata.widgets)' <nb>.ipynb > tmp && mv tmp <nb>.ipynb`
+- [ ] Use every checklist item relevant to this PR. Keep the full checklist
+  hidden, and copy only the resulting actions or evidence into the visible
+  description.
 
 <details>
 <summary><b>Python API and docs</b> — new widget, loader, or API change</summary>
@@ -184,11 +195,10 @@ https://doi.org/10.1039/d6dd00121a
   state. See [GitHub preview](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/github-preview.md).
 
 </details>
+-->
 
 ---
 
-This PR workflow follows the packaging standards for reproducible scientific
-software described in [scikit-package](https://doi.org/10.1039/d6dd00121a):
-S. Lee, C. Myers, A. Yang, T. Zhang, Y. Xiao, and S. J. L. Billinge,
-*Digital Discovery* (2026), DOI
-[10.1039/d6dd00121a](https://doi.org/10.1039/d6dd00121a).
+This PR follows the
+[scikit-package](https://scikit-package.github.io/scikit-package/) workflow for
+reproducible scientific software.

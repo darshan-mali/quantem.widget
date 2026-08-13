@@ -134,6 +134,22 @@ def test_show3d_paged_state_and_html_roundtrip(tmp_path: pathlib.Path) -> None:
     assert "data-show3d-tool-controls" in html
 
 
+def test_show3d_html_export_preserves_frame_hide_actions(tmp_path: pathlib.Path) -> None:
+    """A portable report keeps the scrubber's hide-frame affordance."""
+    widget = Show3D(
+        np.zeros((4, 8, 8), dtype=np.float32),
+        hideable=True,
+        verbose=False,
+    )
+    widget.hide(2)
+
+    out = widget.export_html(tmp_path / "hideable.html", encoding="uint8")
+    html = out.read_text().replace(" ", "").replace("\n", "")
+
+    assert '"hideable":true' in html
+    assert '"hidden_indices":[2]' in html
+
+
 def test_show3d_paged_to_show2d_uses_current_visible_page() -> None:
     widget = Show3D(
         _paged_stack(),
@@ -178,7 +194,7 @@ def test_show3d_profiles_follow_single_panel_pages() -> None:
 
 def test_show3d_single_panel_page_kymograph_frontend_contract() -> None:
     source = (
-        pathlib.Path(__file__).resolve().parents[1] / "js" / "show3d" / "index.tsx"
+        pathlib.Path(__file__).resolve().parents[2] / "js" / "show3d" / "index.tsx"
     ).read_text(encoding="utf-8")
 
     assert "const singlePanelPageProfile" in source

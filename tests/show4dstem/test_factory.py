@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from quantem.gpu.io.load import LoadResult
 
+from quantem.widget import Show4DSTEM
+from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 import quantem.widget.show4dstem_factory as factory
 
 
@@ -55,7 +57,6 @@ def _preset_region_data(
 
 
 def test_public_show4dstem_import_uses_factory() -> None:
-    from quantem.widget import Show4DSTEM
 
     assert Show4DSTEM is factory.Show4DSTEM
 
@@ -134,6 +135,29 @@ def test_show4dstem_routes_loadresult_chunked_payload_to_mps_builder(monkeypatch
     assert calls == [(payload, {"verbose": False})]
 
 
+def test_show4dstem_opens_mps_5d_loadresult_as_dataset_comparison(monkeypatch) -> None:
+    payload = SimpleNamespace(
+        chunks=[object()],
+        shape=(2, 4, 4, 8, 8),
+        metadata={"scan_shape": (4, 4)},
+    )
+    load_result = LoadResult(payload, {"file_names": ["-2 deg", "+2 deg"]})
+
+    def _fake_mps_builder(data, **kwargs):
+        return {"data": data, "kwargs": kwargs}
+
+    monkeypatch.setattr(factory, "_build_mps_viewer", _fake_mps_builder)
+
+    result = factory.Show4DSTEM(load_result)
+
+    assert result["kwargs"] == {
+        "frame_dim_label": "Dataset",
+        "frame_labels": ["-2 deg", "+2 deg"],
+        "view_mode": "multiple",
+        "compare_dp_mode": "selected",
+    }
+
+
 def test_show4dstem_routes_mps_gpu_frame_proxy_to_mps_builder(monkeypatch) -> None:
     payload = SimpleNamespace(_is_gpu_frames=True, device="mps:0")
 
@@ -181,7 +205,7 @@ def test_show4dstem_base_route_does_not_import_mps_implementation(monkeypatch) -
     assert factory.show4dstem_backend_kind(payload) == "base"
 
 
-def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
+def test_show4dstem_opens_5d_loadresult_as_dataset_comparison(monkeypatch) -> None:
     payload = SimpleNamespace(ndim=5)
     load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
 
@@ -195,12 +219,62 @@ def test_show4dstem_labels_5d_loadresult_as_dataset_stack(monkeypatch) -> None:
     assert result["data"] is payload
     assert result["kwargs"]["frame_dim_label"] == "Dataset"
     assert result["kwargs"]["frame_labels"] == ["first.h5", "second.h5"]
+    assert result["kwargs"]["view_mode"] == "multiple"
+    assert result["kwargs"]["compare_dp_mode"] == "selected"
     assert result["kwargs"]["verbose"] is False
 
 
+def test_show4dstem_preserves_explicit_5d_view_options(monkeypatch) -> None:
+    payload = SimpleNamespace(ndim=5)
+    load_result = LoadResult(payload, {"file_names": ("first.h5", "second.h5")})
+
+    def _fake_base(data, **kwargs):
+        return {"data": data, "kwargs": kwargs}
+
+    monkeypatch.setattr(factory, "_Show4DSTEMBase", _fake_base)
+
+    result = factory.Show4DSTEM(
+        load_result,
+        view_mode="single",
+        compare_dp_mode="average",
+    )
+
+    assert result["kwargs"]["view_mode"] == "single"
+    assert result["kwargs"]["compare_dp_mode"] == "average"
+
+
+def test_simple_5d_loadresult_keeps_selected_and_average_dp_working() -> None:
+    data = np.zeros((2, 2, 2, 6, 6), dtype=np.uint16)
+    data[0, :, :, 1:3, 1:3] = 8
+    data[1, :, :, 3:5, 3:5] = 24
+    loaded = LoadResult(data, {"file_names": ("tilt -2 deg", "tilt +2 deg")})
+
+    widget = factory.Show4DSTEM(
+        loaded,
+        precompute_virtual_images=False,
+        verbose=False,
+    )
+    try:
+        assert widget.view_mode == "multiple"
+        assert widget.compare_dp_mode == "selected"
+        selected_first = widget.frame_bytes
+
+        widget.frame_idx = 1
+        selected_second = widget.frame_bytes
+        assert selected_second != selected_first
+
+        widget.compare_dp_mode = "average"
+        average = widget.frame_bytes
+        assert average != selected_first
+        assert average != selected_second
+
+        widget.compare_dp_mode = "selected"
+        assert widget.frame_bytes == selected_second
+    finally:
+        widget.close()
+
+
 def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = np.arange(2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 4, 4)
     widget = Show4DSTEM(
@@ -222,7 +296,6 @@ def test_public_show4dstem_constructs_small_binned_numpy_viewer() -> None:
 
 
 def test_show4dstem_auto_detects_bf_disk_when_calibration_is_omitted() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = _offset_bf_disk_data()
     widget = Show4DSTEM(data, precompute_virtual_images=False, verbose=False)
@@ -239,7 +312,6 @@ def test_show4dstem_auto_detects_bf_disk_when_calibration_is_omitted() -> None:
 
 
 def test_show4dstem_explicit_bf_calibration_is_not_auto_overwritten() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = _offset_bf_disk_data()
     widget = Show4DSTEM(
@@ -259,7 +331,6 @@ def test_show4dstem_explicit_bf_calibration_is_not_auto_overwritten() -> None:
 
 
 def test_show4dstem_accepts_read_only_numpy_without_torch_warning(recwarn) -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 4, 4)
     data.setflags(write=False)
@@ -277,7 +348,6 @@ def test_show4dstem_accepts_read_only_numpy_without_torch_warning(recwarn) -> No
 
 
 def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(5 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(5, 3, 4, 6, 6)
     widget = Show4DSTEM(
@@ -381,7 +451,6 @@ def test_show4dstem_compare_grid_builds_virtual_image_stack() -> None:
 
 
 def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(3 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(3, 2, 2, 4, 4)
     widget = Show4DSTEM(
@@ -408,7 +477,6 @@ def test_show4dstem_5d_offline_save_state_embeds_inline_stack() -> None:
 
 def test_show4dstem_one_frame_multiple_mode_keeps_single_virtual_image_live() -> None:
     """C1: one 4D dataset with multiple selected, expect single VI drag updates."""
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(3 * 4 * 8 * 8, dtype=np.uint16).reshape(3, 4, 8, 8)
     widget = Show4DSTEM(
@@ -438,7 +506,6 @@ def test_show4dstem_one_frame_multiple_mode_keeps_single_virtual_image_live() ->
 
 def test_show4dstem_one_frame_multiple_mode_preset_clicks_update_single_vi() -> None:
     """C1: BF/ABF/ADF clicks update the visible VI in one-frame multiple mode."""
-    from quantem.widget import Show4DSTEM
 
     data = _preset_region_data()
     widget = Show4DSTEM(
@@ -478,7 +545,6 @@ def test_show4dstem_one_frame_multiple_mode_preset_clicks_update_single_vi() -> 
 
 def test_show4dstem_multiple_mode_preset_clicks_update_compare_grid() -> None:
     """C2: BF/ABF/ADF clicks update the visible compare-grid virtual images."""
-    from quantem.widget import Show4DSTEM
 
     data = _preset_region_data(n_frames=3)
     widget = Show4DSTEM(
@@ -513,7 +579,6 @@ def test_show4dstem_multiple_mode_preset_clicks_update_compare_grid() -> None:
 
 
 def test_show4dstem_compare_grid_pages_panels() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(7 * 3 * 4 * 6 * 6, dtype=np.uint16).reshape(7, 3, 4, 6, 6)
     widget = Show4DSTEM(
@@ -585,8 +650,6 @@ def test_show4dstem_compare_grid_pages_panels() -> None:
 
 
 def test_show4dstem_multiple_init_renders_compare_grid_once(monkeypatch) -> None:
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = np.arange(3 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(3, 2, 2, 4, 4)
     calls = {"virtual": 0, "compare": 0}
@@ -630,7 +693,6 @@ def test_show4dstem_multiple_init_renders_compare_grid_once(monkeypatch) -> None
 
 
 def test_show4dstem_free_reports_data_freed_for_multiple_grid() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.arange(2 * 2 * 2 * 4 * 4, dtype=np.uint16).reshape(2, 2, 2, 4, 4)
     widget = Show4DSTEM(
@@ -653,8 +715,6 @@ def test_show4dstem_free_reports_data_freed_for_multiple_grid() -> None:
 
 
 def test_show4dstem_compare_preset_cache_reuses_multiple_grid(monkeypatch) -> None:
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = np.arange(3 * 2 * 2 * 6 * 6, dtype=np.uint16).reshape(3, 2, 2, 6, 6)
     widget = Show4DSTEM(
@@ -695,8 +755,6 @@ def test_show4dstem_compare_preset_cache_reuses_multiple_grid(monkeypatch) -> No
 def test_show4dstem_frame_virtual_image_uses_sparse_detector_mask(monkeypatch) -> None:
     import torch
 
-    from quantem.widget import Show4DSTEM
-    from quantem.widget.show4dstem import Show4DSTEM as Show4DSTEMBase
 
     data = torch.arange(2 * 4 * 4 * 16 * 16, dtype=torch.int32).to(torch.uint16)
     data = data.reshape(2, 4, 4, 16, 16)
@@ -758,7 +816,6 @@ def test_detector_session_masked_sum_matches_dense_reference() -> None:
 
 
 def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
     data[0] = 4
@@ -793,7 +850,6 @@ def test_show4dstem_compare_grid_normalizes_detector_roi_preview() -> None:
 
 
 def test_show4dstem_single_view_refreshes_after_multiple_mode() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.empty((2, 2, 2, 4, 4), dtype=np.uint16)
     data[0] = 1
@@ -825,7 +881,6 @@ def test_show4dstem_single_view_refreshes_after_multiple_mode() -> None:
 
 
 def test_show4dstem_rejects_noncanonical_view_modes() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
     for view_mode in ("compare", "temporal"):
@@ -834,7 +889,6 @@ def test_show4dstem_rejects_noncanonical_view_modes() -> None:
 
 
 def test_show4dstem_compare_grid_validates_api() -> None:
-    from quantem.widget import Show4DSTEM
 
     data = np.zeros((2, 2, 2, 4, 4), dtype=np.uint16)
 
