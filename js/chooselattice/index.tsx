@@ -1,10 +1,16 @@
 /**
- * ChooseLattice — pick an ordered origin + two lattice-vector points on an image.
+ * ChooseLattice — pick an ordered origin + two lattice-vector points on an image,
+ * then fit a quantem.imaging.Lattice from them.
  *
  * Lean single-panel viewer: one canvas showing a pre-rendered (server-side
  * colormapped) image. Scroll to zoom, drag to pan, click to place up to 3
  * ordered points, drag an existing point to adjust it. Points are reported
  * in ORIGINAL image pixel coordinates regardless of the current zoom/pan.
+ *
+ * Once the kernel has fitted a lattice, the refined r0/u/v arrive as
+ * `lattice_vectors` and detected atom centres as a packed float32
+ * `atom_bytes` buffer; both are drawn on the overlay canvas in image
+ * coordinates so they track zoom and pan.
  */
 
 import * as React from "react";
@@ -13,8 +19,9 @@ import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
 import Button from "@mui/material/Button";
+import Slider from "@mui/material/Slider";
 import { useTheme } from "../theme";
-import { extractBytes, preserveRestoredWidgetModelsOnSave } from "../format";
+import { extractBytes, extractFloat32, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
 
 const MIN_ZOOM = 0.5;
@@ -23,7 +30,38 @@ const CANVAS_SIZE = 512;
 const CANVAS_BORDER_PX = 1;
 const HIT_PX = 10;
 const CLICK_MOVE_THRESHOLD_PX = 4;
-const POINT_COLORS = ["#ff4d4f", "#40a9ff", "#73d13d"];
+const POINT_COLORS = ["#00ffff", "#ff00ff", "#ffff00"]; // Origin, u, v (cyan, magenta, yellow)
+
+// Matches quantem.imaging.lattice_visualization.site_colors(), whose palette
+// is indexed by site (cycling via `% len(palette)`) the same way `atoms[i+2]`
+// (the site index) is used below.
+const ATOM_COLORS = [
+  "#ff0000", // 0: red
+  "#00b3ff", // 1: lighter blue
+  "#00b300", // 2: green (lower perceptual brightness)
+  "#ff00ff", // 3: magenta
+  "#ffb300", // 4: orange
+  "#0000ff", // 5: full blue
+  "#9933cc",
+  "#4dbfbf",
+  "#cc6600",
+  "#339933",
+  "#b3b300",
+  "#ffffff",
+  "#000000", // always last, per upstream palette's ordering convention
+];
+const ATOM_RADIUS_PX = 2.5;
+const GRID_COLOR = "rgba(64,169,255,0.45)";
+const MAX_GRID_LINES = 400;
+
+// Block-size slider: index 0 and index 11 both mean "None" (fit the whole
+// image at once); indices 1-10 are staged block sizes of that size.
+const BLOCK_SIZE_MIN_IDX = 0;
+const BLOCK_SIZE_MAX_IDX = 11;
+const blockSizeToIdx = (value: number | null): number =>
+  value == null ? BLOCK_SIZE_MIN_IDX : Math.max(1, Math.min(10, Math.round(value)));
+const idxToBlockSize = (idx: number): number | null =>
+  idx <= BLOCK_SIZE_MIN_IDX || idx >= BLOCK_SIZE_MAX_IDX ? null : idx;
 
 const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 } as const;
 const compactButton = {
@@ -35,10 +73,130 @@ const compactButton = {
 };
 
 type Point = [number, number]; // [row, col] in original image pixels
+type Vec2 = [number, number];
 type DragMode = "none" | "pan" | "point";
 
 function clamp(value: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, value));
+}
+
+/**
+ * Integer lattice index range (n, m) whose sites can reach the image corners,
+ * solving corner = r0 + n*u + m*v. Returns null for a degenerate basis.
+ */
+function latticeIndexBounds(
+  r0: Vec2,
+  u: Vec2,
+  v: Vec2,
+  height: number,
+  width: number,
+): { nMin: number; nMax: number; mMin: number; mMax: number } | null {
+  const det = u[0] * v[1] - u[1] * v[0];
+  if (!isFinite(det) || Math.abs(det) < 1e-9) return null;
+  const corners: Point[] = [
+    [0, 0],
+    [0, width - 1],
+    [height - 1, 0],
+    [height - 1, width - 1],
+  ];
+  let nMin = Infinity;
+  let nMax = -Infinity;
+  let mMin = Infinity;
+  let mMax = -Infinity;
+  for (const [row, col] of corners) {
+    const dr = row - r0[0];
+    const dc = col - r0[1];
+    const n = (dr * v[1] - dc * v[0]) / det;
+    const m = (dc * u[0] - dr * u[1]) / det;
+    if (!isFinite(n) || !isFinite(m)) return null;
+    nMin = Math.min(nMin, n);
+    nMax = Math.max(nMax, n);
+    mMin = Math.min(mMin, m);
+    mMax = Math.max(mMax, m);
+  }
+  return {
+    nMin: Math.floor(nMin),
+    nMax: Math.ceil(nMax),
+    mMin: Math.floor(mMin),
+    mMax: Math.ceil(mMax),
+  };
+}
+
+/** Draw the fitted lattice as two families of lines spanning the image. */
+function drawLatticeGrid(
+  ctx: CanvasRenderingContext2D,
+  lat: number[][],
+  height: number,
+  width: number,
+  imgToScreen: (row: number, col: number) => [number, number],
+): void {
+  const r0: Vec2 = [lat[0][0], lat[0][1]];
+  const u: Vec2 = [lat[1][0], lat[1][1]];
+  const v: Vec2 = [lat[2][0], lat[2][1]];
+  const bounds = latticeIndexBounds(r0, u, v, height, width);
+  if (!bounds) return;
+  const { nMin, nMax, mMin, mMax } = bounds;
+  if (nMax - nMin + (mMax - mMin) > MAX_GRID_LINES) return;
+
+  const at = (n: number, m: number): [number, number] =>
+    imgToScreen(r0[0] + n * u[0] + m * v[0], r0[1] + n * u[1] + m * v[1]);
+
+  // latticeIndexBounds gives the (n, m) range that COVERS the image corners,
+  // but individual lines within that range still overshoot past the image
+  // edges (it's a bounding box in lattice-index space, not image space).
+  // Clip to the actual image rectangle in screen space so nothing is ever
+  // drawn beyond the original image's dimensions.
+  const [ix0, iy0] = imgToScreen(0, 0);
+  const [ix1, iy1] = imgToScreen(height, width);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(Math.min(ix0, ix1), Math.min(iy0, iy1), Math.abs(ix1 - ix0), Math.abs(iy1 - iy0));
+  ctx.clip();
+  ctx.strokeStyle = GRID_COLOR;
+  ctx.lineWidth = 1;
+  for (let n = nMin; n <= nMax; n++) {
+    const [x0, y0] = at(n, mMin);
+    const [x1, y1] = at(n, mMax);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+  }
+  for (let m = mMin; m <= mMax; m++) {
+    const [x0, y0] = at(nMin, m);
+    const [x1, y1] = at(nMax, m);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * Draw detected atoms from a packed (n, 3) float32 buffer of
+ * [row, col, site_index], colour-coded per site and culled to the viewport.
+ */
+function drawAtoms(
+  ctx: CanvasRenderingContext2D,
+  atoms: Float32Array,
+  canvasW: number,
+  canvasH: number,
+  imgToScreen: (row: number, col: number) => [number, number],
+): void {
+  ctx.save();
+  const margin = ATOM_RADIUS_PX + 2;
+  for (let i = 0; i + 2 < atoms.length; i += 3) {
+    const [x, y] = imgToScreen(atoms[i], atoms[i + 1]);
+    if (x < -margin || y < -margin || x > canvasW + margin || y > canvasH + margin) continue;
+    const site = Math.max(0, Math.round(atoms[i + 2]));
+    ctx.beginPath();
+    ctx.arc(x, y, ATOM_RADIUS_PX, 0, 2 * Math.PI);
+    ctx.fillStyle = ATOM_COLORS[site % ATOM_COLORS.length];
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function ChooseLattice() {
@@ -55,6 +213,30 @@ function ChooseLattice() {
   const [title] = useModelState<string>("title");
   const [pointLabels] = useModelState<string[]>("point_labels");
   const [points, setPoints] = useModelState<Point[]>("points");
+
+  const [latticeVectors] = useModelState<number[][]>("lattice_vectors");
+  const [atomBytes] = useModelState<DataView>("atom_bytes");
+  const [numAtoms] = useModelState<number>("num_atoms");
+  const [hasImaging] = useModelState<boolean>("has_imaging");
+  const [blockSize, setBlockSize] = useModelState<number | null>("block_size");
+  // Local slider position: mirrors `blockSize` but also remembers WHICH end
+  // ("None" is reachable from either extreme) the user last dragged to,
+  // since the model value alone can't distinguish idx 0 from idx 11.
+  const [blockSizeIdx, setBlockSizeIdx] = React.useState<number>(() => blockSizeToIdx(blockSize));
+  React.useEffect(() => {
+    if (blockSize != null) setBlockSizeIdx(blockSize);
+  }, [blockSize]);
+  const handleBlockSizeChange = React.useCallback(
+    (idx: number) => {
+      setBlockSizeIdx(idx);
+      setBlockSize(idxToBlockSize(idx));
+    },
+    [setBlockSize],
+  );
+  const [showGrid, setShowGrid] = useModelState<boolean>("show_grid");
+  const [showAtoms, setShowAtoms] = useModelState<boolean>("show_atoms");
+  const [busy] = useModelState<boolean>("busy");
+  const [status] = useModelState<string>("status");
 
   // Decode the PNG payload once per change into a drawable bitmap.
   const [image, setImage] = React.useState<ImageBitmap | HTMLImageElement | null>(null);
@@ -76,6 +258,13 @@ function ChooseLattice() {
     }
     return () => { cancelled = true; };
   }, [frameBytes]);
+
+  // Atom centres arrive as a packed float32 buffer rather than JSON: a 10k-atom
+  // field is ~120 KB here versus several MB as a nested list trait.
+  const atoms = React.useMemo(
+    () => extractFloat32(atomBytes, numAtoms * 3),
+    [atomBytes, numAtoms],
+  );
 
   // View state: zoom + pan (CSS px, canvas-centered).
   const [zoom, setZoom] = React.useState(1);
@@ -292,7 +481,8 @@ function ChooseLattice() {
     }
   };
 
-  // Overlay: point markers + guide lines from Origin -> u and Origin -> v.
+  // Overlay, painted back to front: fitted lattice grid, detected atoms,
+  // guide lines from Origin -> u and Origin -> v, then the point markers.
   React.useLayoutEffect(() => {
     const canvas = uiRef.current;
     if (!canvas) return;
@@ -301,6 +491,14 @@ function ChooseLattice() {
     canvas.width = canvasW;
     canvas.height = canvasH;
     ctx.clearRect(0, 0, canvasW, canvasH);
+
+    if (showGrid && latticeVectors && latticeVectors.length === 3) {
+      drawLatticeGrid(ctx, latticeVectors, height, width, imgToScreen);
+    }
+    if (showAtoms && atoms && atoms.length) {
+      drawAtoms(ctx, atoms, canvasW, canvasH, imgToScreen);
+    }
+
     const list = points || [];
     if (list.length > 1) {
       const [ox, oy] = imgToScreen(list[0][0], list[0][1]);
@@ -336,7 +534,17 @@ function ChooseLattice() {
       ctx.strokeText(label, x + 9, y - 6);
       ctx.fillText(label, x + 9, y - 6);
     });
-  }, [points, pointLabels, imgToScreen, canvasW, canvasH]);
+  }, [
+    points, pointLabels, imgToScreen, canvasW, canvasH,
+    latticeVectors, atoms, showGrid, showAtoms, height, width,
+  ]);
+
+  const pointCount = (points || []).length;
+  const hasFit = Boolean(latticeVectors && latticeVectors.length === 3);
+  const sendAction = React.useCallback(
+    (action: string) => model.send({ action }),
+    [model],
+  );
 
   const canvasBox = {
     position: "relative" as const,
@@ -371,13 +579,66 @@ function ChooseLattice() {
             <Button
               size="small"
               sx={{ ...compactButton, color: themeColors.accent }}
-              disabled={!points || points.length === 0}
-              onClick={() => setPoints([])}
+              disabled={busy || !hasImaging || pointCount < 3}
+              onClick={() => sendAction("fit")}
+            >
+              Fit Lattice
+            </Button>
+            <Button
+              size="small"
+              sx={{ ...compactButton, color: themeColors.accent }}
+              disabled={busy || !hasImaging || !hasFit}
+              onClick={() => sendAction("detect")}
+            >
+              Detect Atoms
+            </Button>
+            <Button
+              size="small"
+              sx={{ ...compactButton, color: themeColors.accent }}
+              disabled={busy || !numAtoms}
+              onClick={() => sendAction("refine")}
+            >
+              Refine Atoms
+            </Button>
+            <Button
+              size="small"
+              sx={{ ...compactButton, color: themeColors.accent }}
+              disabled={busy || pointCount === 0}
+              onClick={() => { setPoints([]); sendAction("reset"); }}
             >
               Clear Points
             </Button>
           </Stack>
         </Stack>
+
+        {hasImaging && (
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
+            <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
+              Block size
+            </Typography>
+            <Slider
+              size="small"
+              min={BLOCK_SIZE_MIN_IDX}
+              max={BLOCK_SIZE_MAX_IDX}
+              step={1}
+              value={blockSizeIdx}
+              onChange={(_, v) => handleBlockSizeChange(v as number)}
+              disabled={busy}
+              valueLabelDisplay="auto"
+              valueLabelFormat={(v) => (v <= BLOCK_SIZE_MIN_IDX || v >= BLOCK_SIZE_MAX_IDX ? "None" : String(v))}
+              marks={[
+                { value: BLOCK_SIZE_MIN_IDX, label: "None" },
+                { value: 10, label: "10" },
+                { value: BLOCK_SIZE_MAX_IDX, label: "None" },
+              ]}
+              sx={{ width: 180, mx: 1, color: themeColors.accent }}
+              aria-label="Block size"
+            />
+            <Typography sx={{ fontSize: 10, color: themeColors.textMuted, minWidth: 28 }}>
+              {blockSize == null ? "None" : blockSize}
+            </Typography>
+          </Stack>
+        )}
 
         <Box ref={containerRef} sx={canvasBox}>
           <canvas
@@ -402,7 +663,7 @@ function ChooseLattice() {
         </Box>
 
         <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
-          {(points || []).length < 3
+          {pointCount < 3
             ? "Click to place the next point. Scroll to zoom, drag to pan."
             : "Drag a point to adjust it. Scroll to zoom, drag to pan."}
           {cursorPos && (
@@ -411,6 +672,28 @@ function ChooseLattice() {
             </span>
           )}
         </Typography>
+
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: `${SPACING.XS}px` }}>
+          <Button
+            size="small"
+            sx={{ ...compactButton, color: showGrid ? themeColors.accent : themeColors.textMuted }}
+            disabled={!hasFit}
+            onClick={() => setShowGrid(!showGrid)}
+          >
+            {showGrid ? "Hide Grid" : "Show Grid"}
+          </Button>
+          <Button
+            size="small"
+            sx={{ ...compactButton, color: showAtoms ? themeColors.accent : themeColors.textMuted }}
+            disabled={!numAtoms}
+            onClick={() => setShowAtoms(!showAtoms)}
+          >
+            {showAtoms ? "Hide Atoms" : "Show Atoms"}
+          </Button>
+          <Typography sx={{ fontSize: 10, color: themeColors.textMuted }}>
+            {busy ? "Working…" : status}
+          </Typography>
+        </Stack>
 
         <Box sx={{ mt: `${SPACING.SM}px` }}>
           {(pointLabels || []).map((label, i) => {
@@ -429,6 +712,13 @@ function ChooseLattice() {
               </Typography>
             );
           })}
+          {hasFit && (
+            <Typography sx={{ fontSize: 11, fontFamily: "monospace", color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
+              fitted: r0 ({latticeVectors[0][0].toFixed(1)}, {latticeVectors[0][1].toFixed(1)})
+              {" "}u ({latticeVectors[1][0].toFixed(2)}, {latticeVectors[1][1].toFixed(2)})
+              {" "}v ({latticeVectors[2][0].toFixed(2)}, {latticeVectors[2][1].toFixed(2)})
+            </Typography>
+          )}
         </Box>
       </Box>
     </Box>
