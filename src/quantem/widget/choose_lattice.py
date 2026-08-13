@@ -474,7 +474,10 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
     ):
         """Fit the picked origin/u/v with ``Lattice.define_lattice_vectors``.
 
-        Returns the backing ``Lattice`` so calls can be chained.
+        Returns the backing ``Lattice`` so calls can be chained. On success,
+        ``points`` (and therefore ``origin``/``a1``/``a2``/``u``/``v``) are
+        snapped to the fitted ``r0``/``u``/``v`` (rounded to 2 decimals) so
+        they reflect the fit rather than the original clicks.
 
         Defaults to a staged fit (``block_size=5``, from the constructor's
         ``block_size``). Refining over the whole image at once
@@ -510,7 +513,24 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
         if refine:
             self._check_fit_not_degenerate(u, v, block_size)
         self._sync_lattice_vectors()
+        self._sync_points_to_fit()
         return lattice
+
+    def _sync_points_to_fit(self) -> None:
+        """Snap the displayed origin/u/v points to the fitted r0/u/v.
+
+        Uses ``Lattice._lat`` (via ``_fitted_lat``) rather than the picked
+        points, rounded to 2 decimals since the fit is only meaningful to
+        sub-pixel precision. Silent so this doesn't itself invalidate the
+        fit it's reflecting.
+        """
+        fitted = self._fitted_lat()
+        if fitted is None:
+            return
+        r0, u, v = fitted
+        self._set_points_silently(
+            [[round(float(c), 2) for c in p] for p in (r0, r0 + u, r0 + v)]
+        )
 
     def _check_fit_not_degenerate(
         self, picked_u: tuple[float, float], picked_v: tuple[float, float], block_size: int | None

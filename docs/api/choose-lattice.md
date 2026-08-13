@@ -49,6 +49,11 @@ which avoids converging onto an aliased sub-lattice on real images. Pass
 instead — the widget also exposes this as a slider, with a "None" position
 at each end and `1`–`10` in between.
 
+On success, `fit_lattice()` snaps `points` (and therefore `origin`/`a1`/
+`a2`/`u`/`v`) to the fitted `r0`/`u`/`v` from `lattice._lat`, rounded to 2
+decimals, so the point markers move to reflect the fit rather than the
+original clicks.
+
 `reset_lattice()` drops the fitted lattice and detected atoms (picked
 points are kept); editing the points does this automatically.
 
