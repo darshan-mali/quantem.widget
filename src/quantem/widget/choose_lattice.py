@@ -361,8 +361,8 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
         bilinear intensity sum.
     block_size : int, optional
         Block size for staged lattice refinement, default 5. Exposed in the
-        widget as a slider from 1 to 10 with a "None" position at each end.
-        Pass None (or 0) to fit the whole image at once.
+        widget as a slider from 1 to 10 with a "None" position past the top
+        end. Pass None (or 0) to fit the whole image at once.
     cell_samples : int, default 64
         Edge length of the averaged unit-cell tile built after each fit.
         32 is faster and coarser, 128 costs about five times as much for no

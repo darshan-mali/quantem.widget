@@ -85,14 +85,15 @@ const CELL_TILE_REPEAT = 3;
 const CELL_SITE_RADIUS_PX = 5;
 const CELL_SITE_HIT_PX = 10;
 
-// Block-size slider: index 0 and index 11 both mean "None" (fit the whole
-// image at once); indices 1-10 are staged block sizes of that size.
-const BLOCK_SIZE_MIN_IDX = 0;
+// Block-size slider: indices 1-10 are staged block sizes of that size;
+// index 11 (one past the largest real size) means "None" (fit the whole
+// image at once).
+const BLOCK_SIZE_MIN_IDX = 1;
 const BLOCK_SIZE_MAX_IDX = 11;
 const blockSizeToIdx = (value: number | null): number =>
-  value == null ? BLOCK_SIZE_MIN_IDX : Math.max(1, Math.min(10, Math.round(value)));
+  value == null ? BLOCK_SIZE_MAX_IDX : Math.max(BLOCK_SIZE_MIN_IDX, Math.min(10, Math.round(value)));
 const idxToBlockSize = (idx: number): number | null =>
-  idx <= BLOCK_SIZE_MIN_IDX || idx >= BLOCK_SIZE_MAX_IDX ? null : idx;
+  idx >= BLOCK_SIZE_MAX_IDX ? null : idx;
 
 // Number-of-sites slider: 0 means "Auto" (let propose_sites decide), 1-10
 // suggest an exact site count as the max_sites cap.
@@ -827,6 +828,27 @@ function ChooseLattice() {
   // cell is wider than the canvas.
   const contentMaxWidth = canvasW + 2 * CANVAS_BORDER_PX;
 
+  // MUI's built-in .Mui-disabled color (a low-opacity black/white) is nearly
+  // invisible against this widget's own dark background, so every button
+  // overrides it explicitly to the theme's muted text color instead.
+  const buttonSx = (color: string) => ({
+    ...compactButton,
+    color,
+    "&.Mui-disabled": { color: themeColors.textMuted },
+  });
+
+  // MUI defaults mark-label color to the light-mode text-secondary, which is
+  // invisible on this widget's dark background, so recolor + resize them to
+  // match the compact layout. Each label stays centered on its value's exact
+  // position (MUI's default), including at the slider's own two ends.
+  const sliderMarkSx = () => ({
+    "& .MuiSlider-markLabel": {
+      top: 22,
+      fontSize: 10,
+      color: themeColors.textMuted,
+    },
+  });
+
   return (
     <Box
       ref={rootRef}
@@ -844,7 +866,7 @@ function ChooseLattice() {
           <Stack direction="row" spacing={1}>
             <Button
               size="small"
-              sx={{ ...compactButton, color: themeColors.accent }}
+              sx={buttonSx(themeColors.accent)}
               disabled={busy || !hasImaging || pointCount < 3}
               onClick={() => sendAction("fit")}
             >
@@ -852,7 +874,7 @@ function ChooseLattice() {
             </Button>
             <Button
               size="small"
-              sx={{ ...compactButton, color: themeColors.accent }}
+              sx={buttonSx(themeColors.accent)}
               disabled={busy || !hasImaging || !hasFit}
               onClick={() => sendAction("detect")}
             >
@@ -860,7 +882,7 @@ function ChooseLattice() {
             </Button>
             <Button
               size="small"
-              sx={{ ...compactButton, color: themeColors.accent }}
+              sx={buttonSx(themeColors.accent)}
               disabled={busy || !numAtoms}
               onClick={() => sendAction("refine")}
             >
@@ -868,7 +890,7 @@ function ChooseLattice() {
             </Button>
             <Button
               size="small"
-              sx={{ ...compactButton, color: themeColors.accent }}
+              sx={buttonSx(themeColors.accent)}
               disabled={busy || pointCount === 0}
               onClick={() => { setPoints([]); sendAction("reset"); }}
             >
@@ -878,7 +900,7 @@ function ChooseLattice() {
         </Stack>
 
         {hasImaging && (
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: "26px" }}>
             <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
               Block size
             </Typography>
@@ -891,13 +913,12 @@ function ChooseLattice() {
               onChange={(_, v) => handleBlockSizeChange(v as number)}
               disabled={busy}
               valueLabelDisplay="auto"
-              valueLabelFormat={(v) => (v <= BLOCK_SIZE_MIN_IDX || v >= BLOCK_SIZE_MAX_IDX ? "None" : String(v))}
+              valueLabelFormat={(v) => (v >= BLOCK_SIZE_MAX_IDX ? "None" : String(v))}
               marks={[
-                { value: BLOCK_SIZE_MIN_IDX, label: "None" },
-                { value: 10, label: "10" },
+                { value: BLOCK_SIZE_MIN_IDX, label: "1" },
                 { value: BLOCK_SIZE_MAX_IDX, label: "None" },
               ]}
-              sx={{ width: 180, mx: 1, color: themeColors.accent }}
+              sx={{ width: 180, mx: 1, color: themeColors.accent, ...sliderMarkSx() }}
               aria-label="Block size"
             />
             <Typography sx={{ fontSize: 10, color: themeColors.textMuted, minWidth: 28 }}>
@@ -945,7 +966,7 @@ function ChooseLattice() {
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: `${SPACING.XS}px` }}>
             <Button
               size="small"
-              sx={{ ...compactButton, color: showGrid ? themeColors.accent : themeColors.textMuted }}
+              sx={buttonSx(showGrid ? themeColors.accent : themeColors.textMuted)}
               disabled={!hasFit}
               onClick={() => setShowGrid(!showGrid)}
             >
@@ -953,7 +974,7 @@ function ChooseLattice() {
             </Button>
             <Button
               size="small"
-              sx={{ ...compactButton, color: showAtoms ? themeColors.accent : themeColors.textMuted }}
+              sx={buttonSx(showAtoms ? themeColors.accent : themeColors.textMuted)}
               disabled={!numAtoms}
               onClick={() => setShowAtoms(!showAtoms)}
             >
@@ -989,7 +1010,7 @@ function ChooseLattice() {
             <Stack direction="row" spacing={1} sx={{ mt: `${SPACING.SM}px`, mb: `${SPACING.XS}px`, flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
               <Button
                 size="small"
-                sx={{ ...compactButton, color: themeColors.accent }}
+                sx={buttonSx(themeColors.accent)}
                 disabled={busy}
                 onClick={() => sendAction("propose_sites")}
               >
@@ -997,7 +1018,7 @@ function ChooseLattice() {
               </Button>
               <Button
                 size="small"
-                sx={{ ...compactButton, color: themeColors.accent }}
+                sx={buttonSx(themeColors.accent)}
                 disabled={busy || siteCount <= 1}
                 onClick={() => sendAction("clear_sites")}
               >
@@ -1005,7 +1026,7 @@ function ChooseLattice() {
               </Button>
               <Button
                 size="small"
-                sx={{ ...compactButton, color: snapToCommonSites ? themeColors.accent : themeColors.textMuted }}
+                sx={buttonSx(snapToCommonSites ? themeColors.accent : themeColors.textMuted)}
                 disabled={busy}
                 onClick={() => setSnapToCommonSites(!snapToCommonSites)}
               >
@@ -1013,7 +1034,7 @@ function ChooseLattice() {
               </Button>
               <Button
                 size="small"
-                sx={{ ...compactButton, color: trueCellGeometry ? themeColors.accent : themeColors.textMuted }}
+                sx={buttonSx(trueCellGeometry ? themeColors.accent : themeColors.textMuted)}
                 disabled={busy}
                 onClick={() => setTrueCellGeometry(!trueCellGeometry)}
               >
@@ -1021,7 +1042,7 @@ function ChooseLattice() {
               </Button>
             </Stack>
 
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: "26px" }}>
               <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
                 Sites
               </Typography>
@@ -1039,7 +1060,7 @@ function ChooseLattice() {
                   { value: MAX_SITES_MIN, label: "Auto" },
                   { value: MAX_SITES_MAX, label: "10" },
                 ]}
-                sx={{ width: 120, mx: 1, color: themeColors.accent }}
+                sx={{ width: 120, mx: 1, color: themeColors.accent, ...sliderMarkSx() }}
                 aria-label="Number of sites"
               />
               <Typography sx={{ fontSize: 10, color: themeColors.textMuted, minWidth: 28 }}>
@@ -1060,7 +1081,7 @@ function ChooseLattice() {
                 </Typography>
                 <Button
                   size="small"
-                  sx={{ ...compactButton, color: themeColors.textMuted, minWidth: 0 }}
+                  sx={buttonSx(themeColors.textMuted)}
                   disabled={busy || siteCount <= 1}
                   onClick={() => model.send({ action: "remove_site", index: i })}
                 >
