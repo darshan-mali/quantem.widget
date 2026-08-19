@@ -11,6 +11,24 @@
  * `lattice_vectors` and detected atom centres as a packed float32
  * `atom_bytes` buffer; both are drawn on the overlay canvas in image
  * coordinates so they track zoom and pan.
+ *
+ * A fit also delivers `cell_tile_bytes`, a PNG of the averaged unit cell
+ * pre-tiled 3x3 by the kernel, shown as an inset panel so atoms near a cell
+ * edge aren't cut off. Clicking it asks the kernel for a site at that
+ * position; the kernel snaps the pick to the nearest column (and, unless
+ * `snap_to_common_sites` is off, on to a nearby corner/edge/diagonal
+ * fraction) and appends it to `positions_frac`, which `detect_atoms` then
+ * uses. Once `max_sites` names an exact count and that many sites are
+ * placed, an existing site can instead be dragged in the inset to refine
+ * its position - always exactly under the cursor, with no snapping of
+ * either kind.
+ *
+ * The inset renders the tile as a plain square by default, which silently
+ * assumes the fitted u/v lattice vectors are orthogonal - a small lie for a
+ * near-square lattice, a bad one for e.g. hexagonal. `true_cell_geometry`
+ * (off by default) switches it to a true parallelogram matching the real
+ * u/v angle instead; purely a display setting, `positions_frac` is
+ * unaffected either way.
  */
 
 import * as React from "react";
@@ -54,6 +72,19 @@ const ATOM_RADIUS_PX = 2.5;
 const GRID_COLOR = "rgba(64,169,255,0.45)";
 const MAX_GRID_LINES = 400;
 
+// Averaged unit-cell inset: the kernel sends the tile pre-tiled 3x3 (see
+// _sync_cell_tile) so atoms near a cell edge aren't cut off, so the panel
+// spans fractional [-1, 2) on both axes instead of [0, 1). Tile row index
+// maps to fractional a, column index to fractional b, so a click at (x, y)
+// in the panel is (a, b) = CELL_TILE_REPEAT * (y, x) / size - 1.
+// 2x the pre-3x3-tiling size: showing 3x the fractional extent in the same
+// footprint would otherwise shrink each unit cell to a third of its former
+// on-screen size.
+const CELL_PANEL_PX = 352;
+const CELL_TILE_REPEAT = 3;
+const CELL_SITE_RADIUS_PX = 5;
+const CELL_SITE_HIT_PX = 10;
+
 // Block-size slider: index 0 and index 11 both mean "None" (fit the whole
 // image at once); indices 1-10 are staged block sizes of that size.
 const BLOCK_SIZE_MIN_IDX = 0;
@@ -62,6 +93,12 @@ const blockSizeToIdx = (value: number | null): number =>
   value == null ? BLOCK_SIZE_MIN_IDX : Math.max(1, Math.min(10, Math.round(value)));
 const idxToBlockSize = (idx: number): number | null =>
   idx <= BLOCK_SIZE_MIN_IDX || idx >= BLOCK_SIZE_MAX_IDX ? null : idx;
+
+// Number-of-sites slider: 0 means "Auto" (let propose_sites decide), 1-10
+// suggest an exact site count as the max_sites cap.
+const MAX_SITES_MIN = 0;
+const MAX_SITES_MAX = 10;
+const RIGHT_PANEL_PX = 368;
 
 const SPACING = { XS: 4, SM: 8, MD: 12, LG: 16 } as const;
 const compactButton = {
@@ -237,6 +274,16 @@ function ChooseLattice() {
   const [showAtoms, setShowAtoms] = useModelState<boolean>("show_atoms");
   const [busy] = useModelState<boolean>("busy");
   const [status] = useModelState<string>("status");
+  const [cellTileBytes] = useModelState<DataView>("cell_tile_bytes");
+  const [cellCount] = useModelState<number>("cell_count");
+  const [positionsFrac, setPositionsFrac] = useModelState<number[][]>("positions_frac");
+  const [maxSites, setMaxSites] = useModelState<number | null>("max_sites");
+  const [snapToCommonSites, setSnapToCommonSites] = useModelState<boolean>("snap_to_common_sites");
+  const [trueCellGeometry, setTrueCellGeometry] = useModelState<boolean>("true_cell_geometry");
+  const handleMaxSitesChange = React.useCallback(
+    (value: number) => setMaxSites(value <= MAX_SITES_MIN ? null : value),
+    [setMaxSites],
+  );
 
   // Decode the PNG payload once per change into a drawable bitmap.
   const [image, setImage] = React.useState<ImageBitmap | HTMLImageElement | null>(null);
@@ -265,6 +312,26 @@ function ChooseLattice() {
     () => extractFloat32(atomBytes, numAtoms * 3),
     [atomBytes, numAtoms],
   );
+
+  const [cellTile, setCellTile] = React.useState<ImageBitmap | HTMLImageElement | null>(null);
+  React.useEffect(() => {
+    const bytes = extractBytes(cellTileBytes);
+    if (bytes.length === 0) {
+      setCellTile(null);
+      return;
+    }
+    let cancelled = false;
+    const blob = new Blob([bytes as unknown as BlobPart], { type: "image/png" });
+    if (typeof createImageBitmap === "function") {
+      createImageBitmap(blob).then((bmp) => { if (!cancelled) setCellTile(bmp); });
+    } else {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { if (!cancelled) setCellTile(img); URL.revokeObjectURL(url); };
+      img.src = url;
+    }
+    return () => { cancelled = true; };
+  }, [cellTileBytes]);
 
   // View state: zoom + pan (CSS px, canvas-centered).
   const [zoom, setZoom] = React.useState(1);
@@ -539,8 +606,207 @@ function ChooseLattice() {
     latticeVectors, atoms, showGrid, showAtoms, height, width,
   ]);
 
+  // Averaged unit cell: the panel shows a 3x3 tiling of the averaged cell
+  // (fractional [-1, 2) on both axes) so atoms near a cell edge aren't cut
+  // off. Sites are always canonical [0,1) fractions.
+  //
+  // The raster is sampled along the real (possibly non-orthogonal) fitted
+  // u/v lattice vectors, so rendering it as a plain axis-aligned square
+  // silently assumes u perp v - a small lie for a near-square lattice, a
+  // bad one for e.g. hexagonal (~60-120 degrees between u and v). When
+  // trueCellGeometry is on, cellTransform instead derives a linear map
+  // from the real u/v (scaled/centered to fit the fixed panel size) so the
+  // panel renders a true parallelogram; when off (the default) or the
+  // fitted vectors are missing/degenerate, it falls back to exactly the
+  // original per-axis formulas.
+  type CellTransform = {
+    toScreen: (a: number, b: number) => [number, number];
+    toFrac: (x: number, y: number) => [number, number];
+    drawRaster: (ctx: CanvasRenderingContext2D, img: CanvasImageSource & { width: number }) => void;
+  };
+  const cellTransform = React.useMemo<CellTransform>(() => {
+    const identity: CellTransform = {
+      toScreen: (a, b) => [
+        ((b + 1) / CELL_TILE_REPEAT) * CELL_PANEL_PX,
+        ((a + 1) / CELL_TILE_REPEAT) * CELL_PANEL_PX,
+      ],
+      toFrac: (x, y) => [
+        (CELL_TILE_REPEAT * y) / CELL_PANEL_PX - 1,
+        (CELL_TILE_REPEAT * x) / CELL_PANEL_PX - 1,
+      ],
+      drawRaster: (ctx, img) => ctx.drawImage(img, 0, 0, CELL_PANEL_PX, CELL_PANEL_PX),
+    };
+    if (!trueCellGeometry || !latticeVectors || latticeVectors.length !== 3) return identity;
+
+    const u: [number, number] = [latticeVectors[1][0], latticeVectors[1][1]];
+    const v: [number, number] = [latticeVectors[2][0], latticeVectors[2][1]];
+    const det = u[0] * v[1] - u[1] * v[0];
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-6) return identity;
+
+    // Bounding box (in u/v pixel space) of the 3x3-tiled parallelogram
+    // (a, b in [-1, 2]), centered on the panel and scaled to fit with a
+    // small margin.
+    const extents = [-1, 2].flatMap((a) =>
+      [-1, 2].map((b): [number, number] => {
+        const da = a - 0.5;
+        const db = b - 0.5;
+        return [da * u[0] + db * v[0], da * u[1] + db * v[1]];
+      }),
+    );
+    const maxRow = Math.max(...extents.map(([row]) => Math.abs(row)));
+    const maxCol = Math.max(...extents.map(([, col]) => Math.abs(col)));
+    const span = 2 * Math.max(maxRow, maxCol);
+    if (!Number.isFinite(span) || span <= 0) return identity;
+    const scale = (CELL_PANEL_PX * 0.92) / span;
+    const cx = CELL_PANEL_PX / 2;
+    const cy = CELL_PANEL_PX / 2;
+
+    const toScreen = (a: number, b: number): [number, number] => {
+      const da = a - 0.5;
+      const db = b - 0.5;
+      return [cx + scale * (da * u[1] + db * v[1]), cy + scale * (da * u[0] + db * v[0])];
+    };
+    const toFrac = (x: number, y: number): [number, number] => {
+      const col = (x - cx) / scale;
+      const row = (y - cy) / scale;
+      const da = (v[1] * row - v[0] * col) / det;
+      const db = (u[0] * col - u[1] * row) / det;
+      return [da + 0.5, db + 0.5];
+    };
+    // img is the 3x3-tiled raster: pixel (xTile, yTile) is fractional
+    // b = xTile / samples - 1, a = yTile / samples - 1. Express that as
+    // the linear map above, composed into canvas transform coefficients.
+    const drawRaster = (ctx: CanvasRenderingContext2D, img: CanvasImageSource & { width: number }) => {
+      const samples = img.width / CELL_TILE_REPEAT;
+      ctx.save();
+      ctx.transform(
+        (scale * v[1]) / samples, (scale * v[0]) / samples,
+        (scale * u[1]) / samples, (scale * u[0]) / samples,
+        cx - 1.5 * scale * (u[1] + v[1]), cy - 1.5 * scale * (u[0] + v[0]),
+      );
+      ctx.drawImage(img, 0, 0);
+      ctx.restore();
+    };
+    return { toScreen, toFrac, drawRaster };
+  }, [trueCellGeometry, latticeVectors]);
+
+  const cellRef = React.useRef<HTMLCanvasElement>(null);
+  React.useLayoutEffect(() => {
+    const canvas = cellRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    canvas.width = CELL_PANEL_PX;
+    canvas.height = CELL_PANEL_PX;
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = themeColors.bg;
+    ctx.fillRect(0, 0, CELL_PANEL_PX, CELL_PANEL_PX);
+    if (!cellTile) return;
+    cellTransform.drawRaster(ctx, cellTile);
+
+    ctx.save();
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = themeColors.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const corners: [number, number][] = [[0, 0], [0, 1], [1, 1], [1, 0]];
+    corners.forEach(([a, b], i) => {
+      const [x, y] = cellTransform.toScreen(a, b);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+
+    (positionsFrac || []).forEach(([a, b], i) => {
+      const [x, y] = cellTransform.toScreen(a, b);
+      ctx.beginPath();
+      ctx.arc(x, y, CELL_SITE_RADIUS_PX, 0, 2 * Math.PI);
+      ctx.strokeStyle = ATOM_COLORS[i % ATOM_COLORS.length];
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, 1.5, 0, 2 * Math.PI);
+      ctx.fillStyle = ATOM_COLORS[i % ATOM_COLORS.length];
+      ctx.fill();
+    });
+  }, [cellTile, positionsFrac, themeColors.bg, themeColors.border, cellTransform]);
+
+  // Once a specific site count (not "Auto") has been reached, existing
+  // sites can be dragged in the inset to refine their position - always at
+  // the exact dragged fraction, no column/common-site snapping either way,
+  // regardless of the snapToCommonSites toggle (that only applies to
+  // clicks, which place/replace a site via the kernel's snap).
+  const canDragSites = maxSites != null && (positionsFrac || []).length === maxSites;
+  const cellDragRef = React.useRef<{ index: number } | null>(null);
+
+  const cellFracFromEvent = React.useCallback(
+    (e: { clientX: number; clientY: number; currentTarget: HTMLCanvasElement }): [number, number] => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * CELL_PANEL_PX;
+      const y = ((e.clientY - rect.top) / rect.height) * CELL_PANEL_PX;
+      return cellTransform.toFrac(x, y);
+    },
+    [cellTransform],
+  );
+
+  const hitTestSite = React.useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>): number => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * CELL_PANEL_PX;
+      const y = ((e.clientY - rect.top) / rect.height) * CELL_PANEL_PX;
+      const list = positionsFrac || [];
+      for (let i = list.length - 1; i >= 0; i--) {
+        const [a, b] = list[i];
+        const [mx, my] = cellTransform.toScreen(a, b);
+        if (Math.hypot(x - mx, y - my) <= CELL_SITE_HIT_PX) return i;
+      }
+      return -1;
+    },
+    [positionsFrac, cellTransform],
+  );
+
+  const handleCellMouseDown = React.useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (busy) return;
+      if (canDragSites) {
+        const hit = hitTestSite(e);
+        if (hit !== -1) {
+          cellDragRef.current = { index: hit };
+        }
+      }
+    },
+    [busy, canDragSites, hitTestSite],
+  );
+
+  const handleCellMouseMove = React.useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const drag = cellDragRef.current;
+      if (!drag) return;
+      const [a, b] = cellFracFromEvent(e);
+      const next = (positionsFrac || []).map((site, i) =>
+        i === drag.index ? [clamp(a, 0, 1), clamp(b, 0, 1)] : site,
+      );
+      setPositionsFrac(next);
+    },
+    [cellFracFromEvent, positionsFrac, setPositionsFrac],
+  );
+
+  const handleCellMouseUp = React.useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const wasDragging = cellDragRef.current !== null;
+      cellDragRef.current = null;
+      if (busy || wasDragging) return;
+      const [a, b] = cellFracFromEvent(e);
+      model.send({ action: "pick_site_frac", frac: [a, b] });
+    },
+    [busy, cellFracFromEvent, model],
+  );
+
   const pointCount = (points || []).length;
   const hasFit = Boolean(latticeVectors && latticeVectors.length === 3);
+  const siteCount = (positionsFrac || []).length;
   const sendAction = React.useCallback(
     (action: string) => model.send({ action }),
     [model],
@@ -639,87 +905,197 @@ function ChooseLattice() {
             </Typography>
           </Stack>
         )}
+      </Box>
 
-        <Box ref={containerRef} sx={canvasBox}>
-          <canvas
-            ref={canvasRef}
-            style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, imageRendering: "pixelated" }}
-          />
-          <canvas
-            ref={uiRef}
-            style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
-          />
-          <canvas
-            width={canvasW}
-            height={canvasH}
-            style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, cursor: "crosshair", opacity: 0 }}
-            onWheel={handleWheel}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMoveReadout}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={() => { dragRef.current = null; setCursorPos(null); }}
-            onDoubleClick={handleDoubleClick}
-          />
-        </Box>
+      <Stack direction="row" spacing={`${SPACING.LG}px`} alignItems="flex-start">
+        <Box sx={{ maxWidth: contentMaxWidth }}>
+          <Box ref={containerRef} sx={canvasBox}>
+            <canvas
+              ref={canvasRef}
+              style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, imageRendering: "pixelated" }}
+            />
+            <canvas
+              ref={uiRef}
+              style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, pointerEvents: "none" }}
+            />
+            <canvas
+              width={canvasW}
+              height={canvasH}
+              style={{ position: "absolute", top: 0, left: 0, width: canvasW, height: canvasH, cursor: "crosshair", opacity: 0 }}
+              onWheel={handleWheel}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMoveReadout}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={() => { dragRef.current = null; setCursorPos(null); }}
+              onDoubleClick={handleDoubleClick}
+            />
+          </Box>
 
-        <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
-          {pointCount < 3
-            ? "Click to place the next point. Scroll to zoom, drag to pan."
-            : "Drag a point to adjust it. Scroll to zoom, drag to pan."}
-          {cursorPos && (
-            <span style={{ marginLeft: 8, color: themeColors.accent }}>
-              ({cursorPos[0].toFixed(1)}, {cursorPos[1].toFixed(1)})
-            </span>
-          )}
-        </Typography>
-
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: `${SPACING.XS}px` }}>
-          <Button
-            size="small"
-            sx={{ ...compactButton, color: showGrid ? themeColors.accent : themeColors.textMuted }}
-            disabled={!hasFit}
-            onClick={() => setShowGrid(!showGrid)}
-          >
-            {showGrid ? "Hide Grid" : "Show Grid"}
-          </Button>
-          <Button
-            size="small"
-            sx={{ ...compactButton, color: showAtoms ? themeColors.accent : themeColors.textMuted }}
-            disabled={!numAtoms}
-            onClick={() => setShowAtoms(!showAtoms)}
-          >
-            {showAtoms ? "Hide Atoms" : "Show Atoms"}
-          </Button>
-          <Typography sx={{ fontSize: 10, color: themeColors.textMuted }}>
-            {busy ? "Working…" : status}
+          <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
+            {pointCount < 3
+              ? "Click to place the next point. Scroll to zoom, drag to pan."
+              : "Drag a point to adjust it. Scroll to zoom, drag to pan."}
+            {cursorPos && (
+              <span style={{ marginLeft: 8, color: themeColors.accent }}>
+                ({cursorPos[0].toFixed(1)}, {cursorPos[1].toFixed(1)})
+              </span>
+            )}
           </Typography>
-        </Stack>
 
-        <Box sx={{ mt: `${SPACING.SM}px` }}>
-          {(pointLabels || []).map((label, i) => {
-            const p = (points || [])[i];
-            const origin = (points || [])[0];
-            // Origin is reported as its raw pixel position; the other two
-            // points are reported as lattice vectors relative to the origin
-            // (u = a1 - origin, v = a2 - origin), not raw pixel positions.
-            const isVector = i > 0;
-            const value = isVector && p && origin
-              ? [p[0] - origin[0], p[1] - origin[1]]
-              : (!isVector ? p : null);
-            return (
-              <Typography key={label + i} sx={{ fontSize: 11, fontFamily: "monospace", color: value ? POINT_COLORS[i % POINT_COLORS.length] : themeColors.textMuted }}>
-                {label}: {value ? `(${value[0].toFixed(1)}, ${value[1].toFixed(1)})` : "not placed"}
-              </Typography>
-            );
-          })}
-          {hasFit && (
-            <Typography sx={{ fontSize: 11, fontFamily: "monospace", color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
-              fitted: r0 ({latticeVectors[0][0].toFixed(1)}, {latticeVectors[0][1].toFixed(1)})
-              {" "}u ({latticeVectors[1][0].toFixed(2)}, {latticeVectors[1][1].toFixed(2)})
-              {" "}v ({latticeVectors[2][0].toFixed(2)}, {latticeVectors[2][1].toFixed(2)})
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: `${SPACING.XS}px` }}>
+            <Button
+              size="small"
+              sx={{ ...compactButton, color: showGrid ? themeColors.accent : themeColors.textMuted }}
+              disabled={!hasFit}
+              onClick={() => setShowGrid(!showGrid)}
+            >
+              {showGrid ? "Hide Grid" : "Show Grid"}
+            </Button>
+            <Button
+              size="small"
+              sx={{ ...compactButton, color: showAtoms ? themeColors.accent : themeColors.textMuted }}
+              disabled={!numAtoms}
+              onClick={() => setShowAtoms(!showAtoms)}
+            >
+              {showAtoms ? "Hide Atoms" : "Show Atoms"}
+            </Button>
+            <Typography sx={{ fontSize: 10, color: themeColors.textMuted }}>
+              {busy ? "Working…" : status}
             </Typography>
-          )}
+          </Stack>
         </Box>
+
+        {hasFit && cellTile && (
+          <Box sx={{ width: RIGHT_PANEL_PX, flexShrink: 0 }}>
+            <canvas
+              ref={cellRef}
+              onMouseDown={handleCellMouseDown}
+              onMouseMove={handleCellMouseMove}
+              onMouseUp={handleCellMouseUp}
+              onMouseLeave={() => { cellDragRef.current = null; }}
+              style={{
+                width: CELL_PANEL_PX,
+                height: CELL_PANEL_PX,
+                border: `${CANVAS_BORDER_PX}px solid ${themeColors.border}`,
+                cursor: busy ? "wait" : canDragSites ? "grab" : "crosshair",
+                imageRendering: "pixelated",
+              }}
+            />
+            <Typography sx={{ fontSize: 10, color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
+              Averaged cell ({cellCount} cells) —{" "}
+              {canDragSites ? "drag a site to refine it" : "click a column to add a site"}
+            </Typography>
+
+            <Stack direction="row" spacing={1} sx={{ mt: `${SPACING.SM}px`, mb: `${SPACING.XS}px`, flexWrap: "wrap", gap: `${SPACING.XS}px` }}>
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: themeColors.accent }}
+                disabled={busy}
+                onClick={() => sendAction("propose_sites")}
+              >
+                Auto Sites
+              </Button>
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: themeColors.accent }}
+                disabled={busy || siteCount <= 1}
+                onClick={() => sendAction("clear_sites")}
+              >
+                Clear Sites
+              </Button>
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: snapToCommonSites ? themeColors.accent : themeColors.textMuted }}
+                disabled={busy}
+                onClick={() => setSnapToCommonSites(!snapToCommonSites)}
+              >
+                {snapToCommonSites ? "Snap: On" : "Snap: Off"}
+              </Button>
+              <Button
+                size="small"
+                sx={{ ...compactButton, color: trueCellGeometry ? themeColors.accent : themeColors.textMuted }}
+                disabled={busy}
+                onClick={() => setTrueCellGeometry(!trueCellGeometry)}
+              >
+                {trueCellGeometry ? "True Geometry: On" : "True Geometry: Off"}
+              </Button>
+            </Stack>
+
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: `${SPACING.SM}px` }}>
+              <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
+                Sites
+              </Typography>
+              <Slider
+                size="small"
+                min={MAX_SITES_MIN}
+                max={MAX_SITES_MAX}
+                step={1}
+                value={maxSites == null ? MAX_SITES_MIN : maxSites}
+                onChange={(_, v) => handleMaxSitesChange(v as number)}
+                disabled={busy}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => (v <= MAX_SITES_MIN ? "Auto" : String(v))}
+                marks={[
+                  { value: MAX_SITES_MIN, label: "Auto" },
+                  { value: MAX_SITES_MAX, label: "10" },
+                ]}
+                sx={{ width: 120, mx: 1, color: themeColors.accent }}
+                aria-label="Number of sites"
+              />
+              <Typography sx={{ fontSize: 10, color: themeColors.textMuted, minWidth: 28 }}>
+                {maxSites == null ? "Auto" : maxSites}
+              </Typography>
+            </Stack>
+
+            {(positionsFrac || []).map(([a, b], i) => (
+              <Stack key={`site-${i}`} direction="row" spacing={1} alignItems="center">
+                <Typography
+                  sx={{
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    color: ATOM_COLORS[i % ATOM_COLORS.length],
+                  }}
+                >
+                  site {i}: ({a.toFixed(3)}, {b.toFixed(3)})
+                </Typography>
+                <Button
+                  size="small"
+                  sx={{ ...compactButton, color: themeColors.textMuted, minWidth: 0 }}
+                  disabled={busy || siteCount <= 1}
+                  onClick={() => model.send({ action: "remove_site", index: i })}
+                >
+                  ×
+                </Button>
+              </Stack>
+            ))}
+          </Box>
+        )}
+      </Stack>
+
+      <Box sx={{ maxWidth: contentMaxWidth, mt: `${SPACING.SM}px` }}>
+        {(pointLabels || []).map((label, i) => {
+          const p = (points || [])[i];
+          const origin = (points || [])[0];
+          // Origin is reported as its raw pixel position; the other two
+          // points are reported as lattice vectors relative to the origin
+          // (u = a1 - origin, v = a2 - origin), not raw pixel positions.
+          const isVector = i > 0;
+          const value = isVector && p && origin
+            ? [p[0] - origin[0], p[1] - origin[1]]
+            : (!isVector ? p : null);
+          return (
+            <Typography key={label + i} sx={{ fontSize: 11, fontFamily: "monospace", color: value ? POINT_COLORS[i % POINT_COLORS.length] : themeColors.textMuted }}>
+              {label}: {value ? `(${value[0].toFixed(1)}, ${value[1].toFixed(1)})` : "not placed"}
+            </Typography>
+          );
+        })}
+        {hasFit && (
+          <Typography sx={{ fontSize: 11, fontFamily: "monospace", color: themeColors.textMuted, mt: `${SPACING.XS}px` }}>
+            fitted: r0 ({latticeVectors[0][0].toFixed(1)}, {latticeVectors[0][1].toFixed(1)})
+            {" "}u ({latticeVectors[1][0].toFixed(2)}, {latticeVectors[1][1].toFixed(2)})
+            {" "}v ({latticeVectors[2][0].toFixed(2)}, {latticeVectors[2][1].toFixed(2)})
+          </Typography>
+        )}
       </Box>
     </Box>
   );
