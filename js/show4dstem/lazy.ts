@@ -6,8 +6,8 @@
 // - CoM/DPC = a small precomputed per-scan CoM field.
 // The full 38 GB never enters VRAM; the disk stays the store. Same method signatures as
 // DetectorCompute so the component's recomputeVI / recomputeFrame / recomputeCoM work unchanged.
-import { decodeBslz4ToStack } from "../.generated/engine/io/backends/webgpu/bslz4";
-import { getGPUDevice } from "../.generated/engine/device/webgpu";
+import { decodeBslz4ToStack } from "../.generated/engine/bslz4";
+import { getGPUDevice } from "../.generated/engine/device";
 
 function be32(b: Uint8Array, o: number): number { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
 type LazySourceDtype = "uint8" | "uint16" | "uint32" | "float32";

@@ -28,18 +28,18 @@ import {
   buildDetectorMask,
   buildFullDetectorMask,
   buildScanMask,
-  DetectorCompute,
-} from "../.generated/engine/detector/compute/webgpu/backend";
-import { readH5MasterInfo, readH5Volume } from "../.generated/engine/io/backends/webgpu/h5reader";
-import { decodeBslz4Batch, type Bslz4Spec } from "../.generated/engine/io/backends/webgpu/bslz4";
+  Show4DSTEMCompute as DetectorCompute,
+} from "../.generated/engine/compute";
+import { readH5MasterInfo, readH5Volume } from "../.generated/engine/h5reader";
+import { decodeBslz4Batch, type Bslz4Spec } from "../.generated/engine/bslz4";
 import {
   collectShow4DSTEMLocalH5Files,
   loadShow4DSTEMLocalH5MaskedSum,
   loadShow4DSTEMLocalH5Master,
   setShow4DSTEMLocalFiles,
   show4DSTEMHasLocalFiles,
-} from "../.generated/engine/io/backends/webgpu/local-h5";
-import { getGPUInfo, isSoftwareGPUAdapter } from "../.generated/engine/device/webgpu";
+} from "../.generated/engine/local-h5";
+import { getGPUInfo, isSoftwareGPUAdapter } from "../.generated/engine/device";
 import { LazyShow4DSTEM } from "./lazy";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
@@ -3645,9 +3645,6 @@ function Show4DSTEM() {
               if (masterInfo) {
                 if (!hasEmbeddedBadPx && masterInfo.badPixels.length) h5BadPx = new Uint32Array(masterInfo.badPixels);
                 h5TotalFrames = Math.max(0, Math.round(Number(masterInfo.totalFrames || h5TotalFrames || 0)));
-                if (Number.isFinite(masterInfo.dataFileCount) && Number(masterInfo.dataFileCount) > 0) {
-                  maxDataFiles = Math.round(Number(masterInfo.dataFileCount));
-                }
               }
             } catch (e) {
               console.warn("Could not read HDF5 master metadata; continuing without detector mask/file-count bounds", e);
@@ -3876,10 +3873,7 @@ function Show4DSTEM() {
             let files = 0;
             let fileLimit = maxPrefetchFiles;
             try {
-              const masterInfo = await readH5MasterInfoCached(h5Urls[index], `prefetch-${index}`);
-              if (Number.isFinite(masterInfo?.dataFileCount) && Number(masterInfo?.dataFileCount) > 0) {
-                fileLimit = Math.min(fileLimit, Math.round(Number(masterInfo?.dataFileCount)));
-              }
+              await readH5MasterInfoCached(h5Urls[index], `prefetch-${index}`);
             } catch (error) {
               console.warn("Show4DSTEM HDF5 prefetch could not read master metadata", error);
             }
@@ -4931,26 +4925,6 @@ function Show4DSTEM() {
         },
         warmStandardViCache,
         warmCache: () => warmCacheSummary(),
-        prepareDetectorMajor: async (options?: { maxVolumes?: number }) => {
-          const indices = compareVisibleIndices();
-          const maxVolumes = Math.max(1, Math.min(indices.length, Math.round(Number(options?.maxVolumes ?? indices.length))));
-          const loaded = [] as DetectorCompute[];
-          for (const idx of indices) {
-            if (loaded.length >= maxVolumes) break;
-            const panelCompute = getVol ? await getVol(idx) : compute;
-            if (panelCompute instanceof DetectorCompute) loaded.push(panelCompute);
-          }
-          const device = loaded[0]?.getDevice();
-          if (!device || !loaded.length) return { available: false, reason: "no loaded WebGPU volumes" };
-          const startedAt = performance.now();
-          const result = DetectorCompute.prepareU8WordMajorBatch(loaded);
-          await device.queue.onSubmittedWorkDone().catch(() => {});
-          return {
-            ...result,
-            loaded: loaded.length,
-            elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
-          };
-        },
         compareGpuBench: async (options?: {
           mode?: string;
           centerRow?: number;

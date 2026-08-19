@@ -19,23 +19,18 @@ import json
 import os
 from pathlib import Path
 
+# quantem.gpu keeps all browser-compute sources flat under quantem/gpu/webgpu/,
+# each importing siblings via bare "./name" relative paths - so they can be
+# copied verbatim into one flat output directory (see outputDir handling below).
 names = (
-    "device/webgpu.ts",
-    "io/backends/webgpu/bslz4.ts",
-    "io/backends/webgpu/h5reader.ts",
-    "io/backends/webgpu/local-h5.ts",
-    "detector/compute/webgpu/backend.ts",
-    "dpc/compute/webgpu/fft.ts",
-    "dpc/compute/webgpu/kernels.ts",
-    "ssb/compute/webgpu/backend.ts",
-    "ssb/compute/webgpu/optimizer.ts",
-    "ssb/compute/webgpu/protocol.ts",
-    "ssb/compute/webgpu/kernels/common.ts",
-    "ssb/compute/webgpu/kernels/fft128.ts",
-    "ssb/compute/webgpu/kernels/fft256.ts",
-    "ssb/compute/webgpu/kernels/fft512.ts",
-    "ssb/compute/webgpu/kernels/fft1024.ts",
-    "ssb/compute/webgpu/kernels/index.ts",
+    "webgpu/device.ts",
+    "webgpu/bslz4.ts",
+    "webgpu/h5reader.ts",
+    "webgpu/local-h5.ts",
+    "webgpu/compute.ts",
+    "webgpu/fft-shader.ts",
+    "webgpu/lazy.ts",
+    "webgpu/showptycho-ssb.ts",
 )
 source_root = os.environ.get("QUANTEM_GPU_SRC")
 if source_root:
@@ -94,8 +89,9 @@ print(json.dumps({
   let changed = 0;
   let unchanged = 0;
   for (const [name, text] of Object.entries(sources)) {
-    const dest = path.join(outputDir, name);
-    mkdirSync(path.dirname(dest), { recursive: true });
+    // Sources are already flat siblings under quantem/gpu/webgpu/ (see the
+    // manifest above), so the output tree drops the "webgpu/" prefix too.
+    const dest = path.join(outputDir, path.basename(name));
     const current = existsSync(dest) ? readFileSync(dest, "utf8") : null;
     if (current === text) {
       unchanged += 1;

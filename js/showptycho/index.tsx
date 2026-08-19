@@ -37,7 +37,18 @@ import { COLORMAPS, COLORMAP_NAMES, renderToOffscreen, GPUColormapEngine, getGPU
 import { fft2d, nextPow2, fftshift, computeMagnitude, applyHannWindow2D, getWebGPUFFT, WebGPUFFT } from "../fft";
 import { drawScaleBarHiDPI, drawFFTScaleBarHiDPI } from "../figure";
 import { computeHistogramFromBytes } from "../stats";
-import { WebGPUSSBBackend, deleteSSBFolderFile, readSSBFolderBytes, readSSBFolderJson, setSSBLocalDirectory, setSSBLocalFiles, ssbFolderWritable, ssbNeedsLocalSource, writeSSBFolderFile, type WebGPULoadProgress } from "../.generated/engine/ssb/compute/webgpu/backend";
+import {
+  ShowPtychoWebGPUSSB as WebGPUSSBBackend,
+  deleteShowPtychoFolderFile as deleteSSBFolderFile,
+  readShowPtychoFolderBytes as readSSBFolderBytes,
+  readShowPtychoFolderJson as readSSBFolderJson,
+  setShowPtychoLocalDirectory as setSSBLocalDirectory,
+  setShowPtychoLocalFiles as setSSBLocalFiles,
+  showPtychoFolderWritable as ssbFolderWritable,
+  showPtychoNeedsLocalSource as ssbNeedsLocalSource,
+  writeShowPtychoFolderFile as writeSSBFolderFile,
+  type WebGPULoadProgress,
+} from "../.generated/engine/showptycho-ssb";
 
 /* ================================================================
    Design tokens (matching Live / Show2D)
