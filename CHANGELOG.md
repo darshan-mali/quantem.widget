@@ -6,6 +6,31 @@ new `rcN` heading when that rc is published to TestPyPI.
 
 ## Unreleased
 
+- Maintainer docs split pull requests into discuss-first (new widgets,
+  cross-widget refactors) and incremental in-widget fixes, and add a
+  `widget-tutorials/` upload page for the public
+  [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data)
+  dataset. A copyable agent prompt opens that Hugging Face Community
+  pull request after `python -m check_meta` prints `ok`.
+- Installation, Colab tutorial cells, and the verify snippet now install the
+  TestPyPI wheel and import `load` from `quantem.gpu.io`. `quantem
+  showdiffraction --demo` is documented as needing the public Fe3O4 hub folder,
+  which is not in the current dataset snapshot.
+- ShowDiffraction detection denoise: center refinement and spot/ring detection
+  now run on a denoised view of the frame (`detect_denoise`, default `"auto"`:
+  Anscombe for sparse counting data, light Gaussian for moderate-SNR data,
+  identity when clean). All fits and measurements keep using the raw frame, so
+  positions and radii are never biased by the smoothing.
+- ShowDiffraction `detect_spots` exposes its shot-noise contrast floor as
+  `noise_sigma`; lower it on frames whose diffuse scattering or detector
+  shadows inflate the robust noise estimate past real peak contrast.
+- ShowDiffraction display denoise: a view-only `denoise` trait (including the
+  new Poisson non-local means `nlm` filter, which keeps spots sharp where the
+  detection blur softens them) and a `show_detection_view` toggle that
+  displays what detection saw; both leave stored data and measurements raw.
+- Add `Mask2D`, a focused image selector that turns one full-resolution
+  rectangle, square, or circle into a Boolean `(row, col)` mask for downstream
+  analysis while preserving calibrated dataset display and standalone HTML.
 - Add `ChooseLattice`, an interactive 2D selector for choosing an ordered
   origin, a1, and a2 and exposing their `(row, col)` coordinates and derived
   lattice vectors for downstream analysis.

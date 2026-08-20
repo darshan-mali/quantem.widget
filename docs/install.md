@@ -23,32 +23,47 @@ pip install -i https://test.pypi.org/simple/ \
     "quantem.widget[hub]"
 ```
 
+Widget tutorial fixtures live under `widget-tutorials/` on
+[bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data).
+Upload and download commands are on that dataset card.
+
 ## Google Colab
 
 Each tutorial notebook can open directly in Colab from the badge at the top of
 the notebook. Colab uses the same files that build these docs, so there is no
 separate Colab copy to maintain.
 
-If the package is not already available in the Colab runtime, run this once near
-the top of the notebook:
+Each Colab-ready tutorial has one collapsed **Install QuantEM** cell. Its two
+plain steps download and run the shared `scripts/install_colab.py` installer, which
+resolves only the newest `quantem.widget` and `quantem.gpu` wheel URLs from
+TestPyPI. Normal dependencies still come from PyPI, and Colab's loaded NumPy
+and Numba versions are preserved. After installation, the cell calls
+`quantem.widget.profile()` automatically so the notebook records the installed
+QuantEM versions and active compute environment. Do not use TestPyPI as
+Colab's package index or upgrade NumPy inside the running kernel: either can
+leave the process with incompatible compiled extension modules.
 
-```bash
-%pip install -i https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    quantem.widget
-```
+Show4DSTEM also selects its kernel-backed compute path in Colab because Colab's
+output iframe does not expose WebGPU. When that iframe mounts, the widget asks
+the kernel for its first diffraction and virtual-image buffers again. The
+tutorial can therefore use the normal, final `viewer` expression without
+special display calls, sleeps, or state-resend code. Other notebook and
+exported-HTML contexts keep the browser-compute path.
 
 Common entry points:
 
 | Tutorial | Colab | Source notebook |
 |---|---|---|
 | Example Data | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/download_data.ipynb) |
+| Show1D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show1d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show1d.ipynb) |
 | Show2D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show2d.ipynb) |
 | Show3D | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3d.ipynb) |
 | Show3DSlices | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show3dslices.ipynb) |
 | Show4DSTEM | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/show4dstem.ipynb) |
 | ShowDiffraction | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showdiffraction.ipynb) |
+| Choose Lattice | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/choose_lattice.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/choose_lattice.ipynb) |
 | ShowFolder | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/showfolder.ipynb) |
+| IO/GPU | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/io_gpu.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/io_gpu.ipynb) |
 | HTML and file export | [Open in Colab](https://colab.research.google.com/github/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) | [GitHub](https://github.com/electronmicroscopy/quantem.widget/blob/main/docs/tutorials/widget_export.ipynb) |
 
 ## Backends
@@ -67,6 +82,6 @@ Common entry points:
 
 ```python
 import quantem.widget as qw
-print(qw.__version__)
-print(qw.__all__)   # public widgets, load(), DPC helpers, detector helpers
+
+qw.profile()
 ```

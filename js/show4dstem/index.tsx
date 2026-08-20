@@ -23,23 +23,24 @@ import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useTheme } from "../theme";
 import { COLORMAPS, GPUColormapEngine, applyColormap } from "../colormaps";
-import { WebGPUFFT, getWebGPUFFT, fft2dAsync, fftshift, autoEnhanceFFT, nextPow2, applyHannWindow2D } from "../fft";
+import { WebGPUFFT, getWebGPUFFT, fft2dAsync, fftshift, computeMagnitude, autoEnhanceFFT, nextPow2, applyHannWindow2D, reciprocalCoordinatesFromShiftedOffset } from "../fft";
+import { findFFTPeakWebGPU, sampleLineProfileWebGPU } from "../geometry";
 import {
   buildDetectorMask,
   buildFullDetectorMask,
   buildScanMask,
-  Show4DSTEMCompute as DetectorCompute,
-} from "../.generated/engine/compute";
-import { readH5MasterInfo, readH5Volume } from "../.generated/engine/h5reader";
-import { decodeBslz4Batch, type Bslz4Spec } from "../.generated/engine/bslz4";
+  DetectorCompute,
+} from "../.generated/engine/detector/compute/webgpu/backend";
+import { readH5MasterInfo, readH5Volume } from "../.generated/engine/io/backends/webgpu/h5reader";
+import { decodeBslz4Batch, type Bslz4Spec } from "../.generated/engine/io/backends/webgpu/bslz4";
 import {
   collectShow4DSTEMLocalH5Files,
   loadShow4DSTEMLocalH5MaskedSum,
   loadShow4DSTEMLocalH5Master,
   setShow4DSTEMLocalFiles,
   show4DSTEMHasLocalFiles,
-} from "../.generated/engine/local-h5";
-import { getGPUInfo, isSoftwareGPUAdapter } from "../.generated/engine/device";
+} from "../.generated/engine/io/backends/webgpu/local-h5";
+import { getGPUInfo, isSoftwareGPUAdapter } from "../.generated/engine/device/webgpu";
 import { LazyShow4DSTEM } from "./lazy";
 import { drawScaleBarHiDPI, drawColorbar, roundToNiceValue } from "../figure";
 import { findDataRange, sliderRange, computeStats, computeHistogramFromBytes, percentileClip } from "../stats";
@@ -634,30 +635,6 @@ function formatStat(value: number): string {
 // ============================================================================
 // FFT peak finder (snap to Bragg spot with sub-pixel centroid refinement)
 // ============================================================================
-function findFFTPeak(mag: Float32Array, width: number, height: number, col: number, row: number, radius: number): { row: number; col: number } {
-  const c0 = Math.max(0, Math.floor(col) - radius);
-  const r0 = Math.max(0, Math.floor(row) - radius);
-  const c1 = Math.min(width - 1, Math.floor(col) + radius);
-  const r1 = Math.min(height - 1, Math.floor(row) + radius);
-  let bestCol = Math.round(col), bestRow = Math.round(row), bestVal = -Infinity;
-  for (let ir = r0; ir <= r1; ir++) {
-    for (let ic = c0; ic <= c1; ic++) {
-      const val = mag[ir * width + ic];
-      if (val > bestVal) { bestVal = val; bestCol = ic; bestRow = ir; }
-    }
-  }
-  const wc0 = Math.max(0, bestCol - 1), wc1 = Math.min(width - 1, bestCol + 1);
-  const wr0 = Math.max(0, bestRow - 1), wr1 = Math.min(height - 1, bestRow + 1);
-  let sumW = 0, sumWC = 0, sumWR = 0;
-  for (let ir = wr0; ir <= wr1; ir++) {
-    for (let ic = wc0; ic <= wc1; ic++) {
-      const w = mag[ir * width + ic];
-      sumW += w; sumWC += w * ic; sumWR += w * ir;
-    }
-  }
-  if (sumW > 0) return { row: sumWR / sumW, col: sumWC / sumW };
-  return { row: bestRow, col: bestCol };
-}
 const FFT_SNAP_RADIUS = 5;
 
 /**
@@ -1448,53 +1425,6 @@ function Histogram({
 // ============================================================================
 // Line Profile Sampling
 // ============================================================================
-
-function sampleSingleLine(data: Float32Array, w: number, h: number, row0: number, col0: number, row1: number, col1: number): Float32Array {
-  const dc = col1 - col0;
-  const dr = row1 - row0;
-  const len = Math.sqrt(dc * dc + dr * dr);
-  const n = Math.max(2, Math.ceil(len));
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const t = i / (n - 1);
-    const c = col0 + t * dc;
-    const r = row0 + t * dr;
-    const ci = Math.floor(c), ri = Math.floor(r);
-    const cf = c - ci, rf = r - ri;
-    const c0c = Math.max(0, Math.min(w - 1, ci));
-    const c1c = Math.max(0, Math.min(w - 1, ci + 1));
-    const r0c = Math.max(0, Math.min(h - 1, ri));
-    const r1c = Math.max(0, Math.min(h - 1, ri + 1));
-    out[i] = data[r0c * w + c0c] * (1 - cf) * (1 - rf) +
-             data[r0c * w + c1c] * cf * (1 - rf) +
-             data[r1c * w + c0c] * (1 - cf) * rf +
-             data[r1c * w + c1c] * cf * rf;
-  }
-  return out;
-}
-
-function sampleLineProfile(data: Float32Array, w: number, h: number, row0: number, col0: number, row1: number, col1: number, profileWidth: number = 1): Float32Array {
-  if (profileWidth <= 1) return sampleSingleLine(data, w, h, row0, col0, row1, col1);
-  const dc = col1 - col0;
-  const dr = row1 - row0;
-  const len = Math.sqrt(dc * dc + dr * dr);
-  if (len < 1e-8) return sampleSingleLine(data, w, h, row0, col0, row1, col1);
-  const perpR = -dc / len;
-  const perpC = dr / len;
-  const half = (profileWidth - 1) / 2;
-  let accumulated: Float32Array | null = null;
-  for (let k = 0; k < profileWidth; k++) {
-    const off = -half + k;
-    const vals = sampleSingleLine(data, w, h, row0 + off * perpR, col0 + off * perpC, row1 + off * perpR, col1 + off * perpC);
-    if (!accumulated) {
-      accumulated = vals;
-    } else {
-      for (let i = 0; i < vals.length; i++) accumulated[i] += vals[i];
-    }
-  }
-  if (accumulated) for (let i = 0; i < accumulated.length; i++) accumulated[i] /= profileWidth;
-  return accumulated || new Float32Array(0);
-}
 
 function pointToSegmentDistance(col: number, row: number, col0: number, row0: number, col1: number, row1: number): number {
   const dc = col1 - col0;
@@ -2363,6 +2293,7 @@ function CompareVirtualGrid({
               }}
             >
               <canvas
+                data-quantem-scientific-output={`show4dstem-compare-${frame}`}
                 ref={(node) => { canvasRefs.current[localIdx] = node; }}
                 width={shapeCols}
                 height={shapeRows}
@@ -2714,6 +2645,14 @@ function Show4DSTEM() {
   );
 
   React.useEffect(() => {
+    try {
+      model.send({
+        type: "show4dstem_frontend_ready",
+        version: 1,
+      });
+    } catch {
+      // A closing notebook comm has no mounted UI left to initialize.
+    }
     try {
       model.send({
         type: "compare_page_paint_capability",
@@ -3190,6 +3129,7 @@ function Show4DSTEM() {
   const [viRoiReduce, setViRoiReduce] = useModelState<string>("vi_roi_reduce");
   const [webgpuDpcReady, setWebgpuDpcReady] = React.useState(false);
   const [viGpuVersion, setViGpuVersion] = React.useState(0);
+  const [viGpuRetainedReady, setViGpuRetainedReady] = React.useState(false);
   const viGpuImageRef = React.useRef<ViGpuImage | null>(null);
   // GPU-resident compare panels: frame index -> engine colormap slot. Written by
   // the interactive compare recompute (no readback), consumed by the grid painter.
@@ -3645,6 +3585,9 @@ function Show4DSTEM() {
               if (masterInfo) {
                 if (!hasEmbeddedBadPx && masterInfo.badPixels.length) h5BadPx = new Uint32Array(masterInfo.badPixels);
                 h5TotalFrames = Math.max(0, Math.round(Number(masterInfo.totalFrames || h5TotalFrames || 0)));
+                if (Number.isFinite(masterInfo.dataFileCount) && Number(masterInfo.dataFileCount) > 0) {
+                  maxDataFiles = Math.round(Number(masterInfo.dataFileCount));
+                }
               }
             } catch (e) {
               console.warn("Could not read HDF5 master metadata; continuing without detector mask/file-count bounds", e);
@@ -3873,7 +3816,10 @@ function Show4DSTEM() {
             let files = 0;
             let fileLimit = maxPrefetchFiles;
             try {
-              await readH5MasterInfoCached(h5Urls[index], `prefetch-${index}`);
+              const masterInfo = await readH5MasterInfoCached(h5Urls[index], `prefetch-${index}`);
+              if (Number.isFinite(masterInfo?.dataFileCount) && Number(masterInfo?.dataFileCount) > 0) {
+                fileLimit = Math.min(fileLimit, Math.round(Number(masterInfo?.dataFileCount)));
+              }
             } catch (error) {
               console.warn("Show4DSTEM HDF5 prefetch could not read master metadata", error);
             }
@@ -4925,6 +4871,26 @@ function Show4DSTEM() {
         },
         warmStandardViCache,
         warmCache: () => warmCacheSummary(),
+        prepareDetectorMajor: async (options?: { maxVolumes?: number }) => {
+          const indices = compareVisibleIndices();
+          const maxVolumes = Math.max(1, Math.min(indices.length, Math.round(Number(options?.maxVolumes ?? indices.length))));
+          const loaded = [] as DetectorCompute[];
+          for (const idx of indices) {
+            if (loaded.length >= maxVolumes) break;
+            const panelCompute = getVol ? await getVol(idx) : compute;
+            if (panelCompute instanceof DetectorCompute) loaded.push(panelCompute);
+          }
+          const device = loaded[0]?.getDevice();
+          if (!device || !loaded.length) return { available: false, reason: "no loaded WebGPU volumes" };
+          const startedAt = performance.now();
+          const result = DetectorCompute.prepareU8WordMajorBatch(loaded);
+          await device.queue.onSubmittedWorkDone().catch(() => {});
+          return {
+            ...result,
+            loaded: loaded.length,
+            elapsedMs: Math.round((performance.now() - startedAt) * 10) / 10,
+          };
+        },
         compareGpuBench: async (options?: {
           mode?: string;
           centerRow?: number;
@@ -6815,8 +6781,7 @@ function Show4DSTEM() {
   const dpUiRef = React.useRef<HTMLCanvasElement>(null);  // High-DPI UI overlay for scale bar
   const dpOffscreenRef = React.useRef<HTMLCanvasElement | null>(null);
   const dpImageDataRef = React.useRef<ImageData | null>(null);
-  const virtualGpuCanvasRef = React.useRef<HTMLCanvasElement>(null);
-  const virtualGpuCanvasContextRef = React.useRef<GPUCanvasContext | null>(null);
+  const virtualGpuSnapshotSerialRef = React.useRef(0);
   const virtualCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const virtualOverlayRef = React.useRef<HTMLCanvasElement>(null);
   const viUiRef = React.useRef<HTMLCanvasElement>(null);  // High-DPI UI overlay for scale bar
@@ -7124,6 +7089,7 @@ function Show4DSTEM() {
       && viGpuImageRef.current
       && activeViSource === viGpuImageRef.current.source
     ) {
+      setViGpuRetainedReady(false);
       return;
     }
 
@@ -7209,13 +7175,11 @@ function Show4DSTEM() {
   React.useEffect(() => {
     const gpuImage = viGpuImageRef.current;
     const engine = viGpuColormapRef.current;
-    const canvas = virtualGpuCanvasRef.current;
     const raw = rawVirtualImageRef.current;
     const currentSource = normaliseViSource(model.get("vi_source"));
     if (
       !gpuImage
       || !engine
-      || !canvas
       || compareMode
       || (activeViSource !== gpuImage.source && currentSource !== gpuImage.source)
     ) {
@@ -7275,24 +7239,14 @@ function Show4DSTEM() {
 
     const lut = COLORMAPS[viColormap] || COLORMAPS.inferno;
     engine.uploadLUT(viColormap, lut);
-    if (
-      !virtualGpuCanvasContextRef.current
-      || canvas.width !== shapeCols
-      || canvas.height !== shapeRows
-    ) {
-      virtualGpuCanvasContextRef.current = engine.configureCanvas(canvas, shapeCols, shapeRows);
-    }
-    const ctx = virtualGpuCanvasContextRef.current;
-    if (!ctx) return;
     const renderStart = performance.now();
     let displayRange = "cpu";
-    let rendered = false;
+    let durableFrame: Promise<ImageBitmap | null> | null = null;
     if (vmin != null && vmax != null) {
-      rendered = engine.renderPanelSlotsDirectToCanvas(
+      durableFrame = engine.renderPanelSlotsToImageBitmapAsync(
         [gpuImage.slot],
         { vmin, vmax },
         viScaleMode === "log",
-        ctx,
         {
           width: shapeCols,
           height: shapeRows,
@@ -7314,16 +7268,33 @@ function Show4DSTEM() {
         transform: { zoom: viZoom, panX: viPanX, panY: viPanY },
         smooth: viSmooth,
       };
-      rendered = engine.renderSlotDirectWithGpuRangeToCanvas(
+      durableFrame = engine.renderSlotDirectWithGpuRangeToImageBitmapAsync(
         gpuImage.slot,
         viVminPct,
         viVmaxPct,
         viScaleMode === "log",
-        ctx,
         renderOpts,
       );
     }
-    if (rendered) {
+    if (durableFrame) {
+      const snapshotSerial = ++virtualGpuSnapshotSerialRef.current;
+      void durableFrame.then(bitmap => {
+        if (!bitmap) return;
+        try {
+          if (snapshotSerial !== virtualGpuSnapshotSerialRef.current) return;
+          const retained = virtualCanvasRef.current;
+          const retainedCtx = retained?.getContext("2d");
+          if (!retained || !retainedCtx) return;
+          retainedCtx.clearRect(0, 0, retained.width, retained.height);
+          retainedCtx.drawImage(bitmap, 0, 0, retained.width, retained.height);
+          setViGpuRetainedReady(true);
+        } finally {
+          bitmap.close();
+        }
+      }).catch(error => {
+        setViGpuRetainedReady(false);
+        console.warn("[Show4DSTEM] Could not retain the presented WebGPU virtual image", error);
+      });
       publishShow4DSTEMViDisplay({
         source: gpuImage.source,
         gpuBufferToDisplay: true,
@@ -7535,11 +7506,9 @@ function Show4DSTEM() {
       rawMag = new Float32Array(real.length);
       fftMagCacheRef.current = rawMag;
     }
-    for (let i = 0; i < real.length; i++) {
-      const mag = Math.sqrt(real[i] * real[i] + imag[i] * imag[i]);
-      rawMag[i] = mag;
-      if (fftScaleMode === "log") { magnitude[i] = Math.log1p(mag); }
-      else { magnitude[i] = mag; }
+    computeMagnitude(real, imag, rawMag);
+    for (let i = 0; i < rawMag.length; i++) {
+      magnitude[i] = fftScaleMode === "log" ? Math.log1p(rawMag[i]) : rawMag[i];
     }
 
     let displayMin: number, displayMax: number;
@@ -7833,7 +7802,9 @@ function Show4DSTEM() {
   React.useEffect(() => {
     if (profilePoints.length === 2 && rawDpDataRef.current) {
       const p0 = profilePoints[0], p1 = profilePoints[1];
-      setProfileData(sampleLineProfile(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, p1.row, p1.col, profileWidth));
+      void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, p1.row, p1.col, profileWidth)
+        .then(setProfileData)
+        .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
       if (!profileActive) setProfileActive(true);
     } else {
       setProfileData(null);
@@ -7844,7 +7815,9 @@ function Show4DSTEM() {
   React.useEffect(() => {
     if (viProfilePoints.length === 2 && rawViDataRef.current && shapeCols > 0 && shapeRows > 0) {
       const p0 = viProfilePoints[0], p1 = viProfilePoints[1];
-      setViProfileData(sampleLineProfile(rawViDataRef.current, shapeCols, shapeRows, p0.row, p0.col, p1.row, p1.col, 1));
+      void sampleLineProfileWebGPU(rawViDataRef.current, shapeCols, shapeRows, p0.row, p0.col, p1.row, p1.col, 1)
+        .then(setViProfileData)
+        .catch(error => console.error("[Show4DSTEM] WebGPU VI profile failed", error));
     } else {
       setViProfileData(null);
     }
@@ -8615,7 +8588,9 @@ function Show4DSTEM() {
           draggingDpProfileEndpoint === 1 ? { row: clampedRow, col: clampedCol } : profilePoints[1],
         ];
         setProfileLine(next);
-        setProfileData(sampleLineProfile(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth));
+        void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth)
+          .then(setProfileData)
+          .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
         return;
       }
       if (isDraggingDpProfileLine && dpProfileDragStartRef.current) {
@@ -8636,7 +8611,9 @@ function Show4DSTEM() {
           { row: drag.p1.row + deltaRow, col: drag.p1.col + deltaCol },
         ];
         setProfileLine(next);
-        setProfileData(sampleLineProfile(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth));
+        void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, next[0].row, next[0].col, next[1].row, next[1].col, profileWidth)
+          .then(setProfileData)
+          .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
         return;
       }
       const nextHoveredEndpoint: 0 | 1 | null = d0 <= hitRadius ? 0 : d1 <= hitRadius ? 1 : null;
@@ -8714,7 +8691,9 @@ function Show4DSTEM() {
             } else {
               const p0 = profilePoints[0];
               setProfileLine([p0, pt]);
-              setProfileData(sampleLineProfile(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, pt.row, pt.col, profileWidth));
+              void sampleLineProfileWebGPU(rawDpDataRef.current, detCols, detRows, p0.row, p0.col, pt.row, pt.col, profileWidth)
+                .then(setProfileData)
+                .catch(error => console.error("[Show4DSTEM] WebGPU DP profile failed", error));
             }
           }
         }
@@ -9229,7 +9208,7 @@ function Show4DSTEM() {
     setFftPanY(fftDragStart.panY + dy);
   };
 
-  const handleFftMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleFftMouseUp = async (e: React.MouseEvent<HTMLCanvasElement>) => {
     // Click detection for d-spacing measurement
     if (fftClickStartRef.current) {
       const dx = e.clientX - fftClickStartRef.current.x;
@@ -9254,7 +9233,13 @@ function Show4DSTEM() {
           if (imgCol >= 0 && imgCol < fftW && imgRow >= 0 && imgRow < fftH) {
             // Snap to nearest peak in FFT magnitude
             if (fftMagCacheRef.current) {
-              const snapped = findFFTPeak(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+              let snapped: { row: number; col: number };
+              try {
+                snapped = await findFFTPeakWebGPU(fftMagCacheRef.current, fftW, fftH, imgCol, imgRow, FFT_SNAP_RADIUS);
+              } catch (error) {
+                console.error("[Show4DSTEM] WebGPU FFT peak refinement failed", error);
+                return;
+              }
               imgCol = snapped.col;
               imgRow = snapped.row;
             }
@@ -9271,12 +9256,14 @@ function Show4DSTEM() {
               if (pixelSize > 0) {
                 const paddedW = nextPow2(fftW);
                 const paddedH = nextPow2(fftH);
-                const binC = ((Math.round(imgCol) - halfW) % fftW + fftW) % fftW;
-                const binR = ((Math.round(imgRow) - halfH) % fftH + fftH) % fftH;
-                const freqC = binC <= paddedW / 2 ? binC / (paddedW * pixelSize) : (binC - paddedW) / (paddedW * pixelSize);
-                const freqR = binR <= paddedH / 2 ? binR / (paddedH * pixelSize) : (binR - paddedH) / (paddedH * pixelSize);
-                spatialFreq = Math.sqrt(freqC * freqC + freqR * freqR);
-                dSpacing = spatialFreq > 0 ? 1 / spatialFreq : null;
+                ({ spatialFrequency: spatialFreq, dSpacing } = reciprocalCoordinatesFromShiftedOffset(
+                  Math.round(imgRow) - halfH,
+                  Math.round(imgCol) - halfW,
+                  paddedH,
+                  paddedW,
+                  pixelSize,
+                  pixelSize,
+                ));
               }
               setFftClickInfo({ row: imgRow, col: imgCol, distPx, spatialFreq, dSpacing });
             }
@@ -9656,6 +9643,8 @@ function Show4DSTEM() {
   }, []);
   const currentViSource = normaliseViSource(model.get("vi_source"));
   const viGpuVisible = Boolean(
+    viGpuRetainedReady
+    &&
     viGpuVersion >= 0
     && !compareMode
     && viGpuImageRef.current
@@ -9665,9 +9654,8 @@ function Show4DSTEM() {
     ),
   );
   const getActiveViCanvas = React.useCallback((): HTMLCanvasElement | null => {
-    if (viGpuVisible && virtualGpuCanvasRef.current) return virtualGpuCanvasRef.current;
     return virtualCanvasRef.current;
-  }, [viGpuVisible]);
+  }, []);
   const panelLoadingOverlaySx = React.useMemo(() => ({
     position: "absolute",
     inset: 0,
@@ -9692,7 +9680,11 @@ function Show4DSTEM() {
     letterSpacing: 0,
   }), [themeColors.textMuted, themeInfo.theme]);
   const renderPanelLoadingOverlay = React.useCallback((label: string, detail = "") => (
-    <Box data-show4dstem-panel-loading="true" sx={panelLoadingOverlaySx}>
+    <Box
+      data-show4dstem-panel-loading="true"
+      data-quantem-load-error={/\bfailed\b/i.test(label) ? "true" : undefined}
+      sx={panelLoadingOverlaySx}
+    >
       <Typography sx={panelLoadingTextSx}>
         {label}
         {detail && <Box component="span" sx={{ display: "block", mt: 0.25, fontSize: 10, fontWeight: 500, maxWidth: 220, overflowWrap: "anywhere" }}>{detail}</Box>}
@@ -9779,6 +9771,7 @@ function Show4DSTEM() {
         <Box
           role="status"
           data-testid="show4dstem-offline-status"
+          data-quantem-load-error={offlineStatusIsError ? "true" : undefined}
           sx={{
             mb: `${SPACING.SM}px`,
             px: 1,
@@ -10138,7 +10131,7 @@ function Show4DSTEM() {
 
           {/* DP Canvas */}
           <Box sx={{ ...container.imageBox, width: "100%", maxWidth: canvasSize, aspectRatio: "1 / 1", height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
-            <canvas ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
+            <canvas data-quantem-scientific-output="show4dstem-diffraction-pattern" ref={dpCanvasRef} width={detCols} height={detRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
             <canvas
               ref={dpOverlayRef} width={detCols} height={detRows}
               onPointerDown={handleDpMouseDown} onPointerMove={handleDpMouseMove}
@@ -10624,18 +10617,7 @@ function Show4DSTEM() {
           ) : (
             <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
               <canvas
-                ref={virtualGpuCanvasRef}
-                width={shapeCols}
-                height={shapeRows}
-                style={{
-                  position: "absolute",
-                  width: "100%",
-                  height: "100%",
-                  imageRendering: "pixelated",
-                  display: viGpuVisible ? "block" : "none",
-                }}
-              />
-              <canvas
+                data-quantem-scientific-output="show4dstem-virtual-image"
                 ref={virtualCanvasRef}
                 width={shapeCols}
                 height={shapeRows}
@@ -10644,7 +10626,7 @@ function Show4DSTEM() {
                   width: "100%",
                   height: "100%",
                   imageRendering: "pixelated",
-                  display: viGpuVisible ? "none" : "block",
+                  display: "block",
                 }}
               />
               <canvas
@@ -10969,7 +10951,7 @@ function Show4DSTEM() {
 
             {/* FFT Canvas */}
             <Box sx={{ ...container.imageBox, width: "100%", maxWidth: viCanvasWidth, aspectRatio: `${shapeCols} / ${shapeRows}`, height: "auto", touchAction: "none", ...mobileImageBoxSx }}>
-              <canvas ref={fftCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
+              <canvas data-quantem-scientific-output="show4dstem-fft" ref={fftCanvasRef} width={shapeCols} height={shapeRows} style={{ position: "absolute", width: "100%", height: "100%", imageRendering: "pixelated" }} />
               <canvas
                 ref={fftOverlayRef} width={shapeCols} height={shapeRows}
                 onMouseDown={handleFftMouseDown} onMouseMove={handleFftMouseMove}

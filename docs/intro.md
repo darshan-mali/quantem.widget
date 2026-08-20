@@ -73,6 +73,7 @@ paint - see [Load and I/O](api/io).
 | `Show4DSTEM` | 4D-STEM: live virtual detectors, multi-master review, and WebGPU HTML export | [tutorial](tutorials/show4dstem) · [export](tutorials/show4dstem_export) · [API](api/show4dstem) |
 | `ShowPtycho` | Ptychography aberration review: phase, FFT, BF-count tradeoffs, and WebGPU folder export | [API](api/showptycho) |
 | `ShowDiffraction` | 2D/3D diffraction d-spacing: Bragg spots, rings, center finding, k calibration | [tutorial](tutorials/showdiffraction) · [API](api/showdiffraction) |
+| `ChooseLattice` | Pick an origin and two lattice vectors on a 2D image | [tutorial](tutorials/choose_lattice) · [API](api/choose-lattice) |
 | `ShowFolder` | Folder-level microscopy browser: navigate a session, review thumbnails, select files/folders, and save curation state | [tutorial](tutorials/showfolder) · [API](api/showfolder) |
 
 The [Tutorials](tutorials/download_data) walk through each widget on real public
@@ -129,5 +130,12 @@ https://doi.org/10.1093/mam/ozag053.941.
 
 - **Questions or bugs:** open an issue at
   [github.com/electronmicroscopy/quantem.widget/issues](https://github.com/electronmicroscopy/quantem.widget/issues).
-- **Maintained by** the Ophus group. Contributions and feedback are welcome via
-  pull request or issue.
+- **New widgets and cross-widget refactors:** discuss first (issue or
+  maintainer). In-widget bug fixes can open a pull request directly. See
+  [Pull requests](maintainer/pull-requests.md) and
+  [CONTRIBUTING.md](https://github.com/electronmicroscopy/quantem.widget/blob/main/CONTRIBUTING.md).
+- **Tutorial data:** public
+  [bobleesj/quantem-data](https://huggingface.co/datasets/bobleesj/quantem-data).
+  Upload and download commands are on that dataset card. The GitHub loader
+  pull request is in [Contribute tutorial data](tutorials/contribute_data.md).
+- **Maintained by** the Ophus group.

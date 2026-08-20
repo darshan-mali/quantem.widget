@@ -41,6 +41,7 @@ for backend setup, Colab instructions, and verification.
 |---|---|---|
 | `Show1D` | Scientific traces, reconstruction metrics, and live monitors | [API](https://electronmicroscopy.github.io/quantem.widget/api/show1d.html) |
 | `Show2D` | Images, contrast, FFTs, ROIs, profiles, and scale bars | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show2d.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show2d.html) |
+| `Mask2D` | Draw one rectangle, square, or circle and use its Boolean mask directly in Python | [guide and API](https://electronmicroscopy.github.io/quantem.widget/api/mask2d.html) |
 | `Show3D` | Scrub and play through image or volume stacks | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show3d.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show3d.html) |
 | `Show3DSlices` | Inspect orthogonal slices through a 3D volume | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show3dslices.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show3dslices.html) |
 | `Show4DSTEM` | Live virtual detectors, multi-dataset review, and WebGPU HTML export | [tutorial](https://electronmicroscopy.github.io/quantem.widget/tutorials/show4dstem.html) · [export guide](https://electronmicroscopy.github.io/quantem.widget/tutorials/show4dstem_export.html) · [API](https://electronmicroscopy.github.io/quantem.widget/api/show4dstem.html) |
@@ -77,6 +78,14 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
 tests, documentation standards, and the pull-request workflow. That workflow
 follows the reproducible scientific-software procedures described by
 [scikit-package](https://scikit-package.github.io/scikit-package/).
+
+Would you like to create a widget? Linked [here](https://electronmicroscopy.github.io/quantem.widget/developer/widget-creation.html)
+is a walkthrough that discusses what one should contain and the eleven steps needed to create a widget.
+
+Each widget is meant to be self-contained in its own Python module and `js/`
+folder. This way, every widget can reuse the same kernels and shared browser-GPU work like FFTs
+can all belong in
+[quantem.gpu](https://github.com/bobleesj/quantem.gpu).
 
 Questions and bug reports belong in the
 [issue tracker](https://github.com/electronmicroscopy/quantem.widget/issues).

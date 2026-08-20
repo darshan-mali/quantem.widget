@@ -11,10 +11,11 @@ parts:
       - file: agent-prompts
         title: Agent-assisted development
   # Show4DSTEM and ShowPtycho lead: they are the flagship workflows.
-  # tutorials/show1d is hidden for now (restore from git history when ready).
   - caption: Tutorials
     chapters:
       - file: tutorials/download_data
+      - file: tutorials/contribute_data
+        title: Contribute tutorial data
       - file: tutorials/show4dstem
         sections:
           - file: tutorials/show4dstem_single
@@ -22,10 +23,11 @@ parts:
           - file: tutorials/show4dstem_multiple
             title: Compare datasets or tilts
       - file: tutorials/showptycho
+      - file: tutorials/show1d
       - file: tutorials/show2d
       - file: tutorials/show3d
       - file: tutorials/show3dslices
-      # tutorials/showeds hidden until the ShowEDS widget is updated.
+      - file: tutorials/showeds
       - file: tutorials/showdiffraction
       - file: tutorials/choose_lattice
         title: Choose Lattice
@@ -66,17 +68,20 @@ parts:
           - file: api/viewer-ui
           - file: api/show1d
           - file: api/show2d
+          - file: api/mask2d
           - file: api/show3d
           - file: api/show3dslices
           - file: api/show4dstem
           - file: api/showptycho
-          # api/showeds hidden until the ShowEDS widget is updated.
+          - file: api/showeds
           - file: api/showdiffraction
           - file: api/choose-lattice
           - file: api/showfolder
           - file: api/html-export
           - file: api/io
           - file: api/load
+      - file: developer/widget-creation
+        title: Creating a widget
       - file: developer/ui-guide
         title: UI Guide
       - file: developer/save-state-and-notebook-size
@@ -85,6 +90,8 @@ parts:
       - file: maintainer/index
         title: Maintainer guide
         sections:
+          - file: maintainer/pull-requests
+            title: Pull requests
           - file: maintainer/docs-design
             title: Docs design rules
           - file: changelog
@@ -93,6 +100,8 @@ parts:
             title: Release
           - file: maintainer/automation
             title: Automation
+          - file: maintainer/gpu-migration
+            title: quantem.gpu migration
           - file: maintainer/viewing-html-on-mobile
             title: Mobile HTML
           - file: maintainer/widget-agent-signoff
@@ -114,7 +123,7 @@ parts:
                 title: Show3DSlices
               - file: maintainer/storyboard-show4dstem
                 title: Show4DSTEM
-              # maintainer/storyboard-showeds hidden until ShowEDS is updated.
+              - file: maintainer/storyboard-showeds
               - file: maintainer/storyboard-showfolder
                 title: ShowFolder
               - file: maintainer/storyboard-choose-lattice
