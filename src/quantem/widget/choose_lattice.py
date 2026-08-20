@@ -373,7 +373,11 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
         Minimum distance from the image border for a detected atom, passed
         to ``Lattice.add_atoms``. Keeps atoms whose fit patch would be
         clipped or empty out of ``refine_atoms``, whose amplitude bounds
-        collapse on a flat patch and raise from ``least_squares``.
+        collapse on a flat patch and raise from ``least_squares``. Exposed
+        in the widget as a slider; the excluded border is also drawn as a
+        dashed rectangle on the image so the margin is visible before
+        detecting atoms. Changing it invalidates already-detected atoms,
+        same as changing ``positions_frac``.
     max_sites : int, optional
         Cap on how many sites ``propose_sites_from_cell()`` (the "Auto
         Sites" button) proposes from the averaged cell. Exposed in the
@@ -605,6 +609,10 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
         value = proposal["value"]
         return None if value == 0 else value
 
+    @traitlets.validate("edge_min_dist_px")
+    def _validate_edge_min_dist_px(self, proposal):
+        return max(0.0, float(proposal["value"]))
+
     @traitlets.validate("points")
     def _validate_points(self, proposal):
         return self._validate_points_value(proposal["value"])
@@ -652,6 +660,16 @@ class ChooseLattice(StaticFallbackMixin, anywidget.AnyWidget):
             self.atom_bytes = b""
             self.num_atoms = 0
             self.status = "Sites changed - detect atoms again."
+
+    @traitlets.observe("edge_min_dist_px")
+    def _invalidate_on_edge_margin_change(self, change):
+        """Changing the edge margin makes previously detected atoms stale."""
+        if not self.num_atoms:
+            return
+        with self.hold_sync():
+            self.atom_bytes = b""
+            self.num_atoms = 0
+            self.status = "Edge margin changed - detect atoms again."
 
     def _set_points_silently(self, points: Sequence[Sequence[float]]) -> None:
         """Set points without invalidating a fit that produced them."""

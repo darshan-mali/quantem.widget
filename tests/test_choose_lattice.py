@@ -72,6 +72,26 @@ def test_choose_lattice_points_clamp_to_image_bounds() -> None:
     assert widget.points == [[0.0, 19.0]]
 
 
+def test_choose_lattice_edge_min_dist_px_clamped_nonnegative() -> None:
+    widget = ChooseLattice(np.random.rand(16, 16).astype(np.float32), edge_min_dist_px=-5.0)
+    assert widget.edge_min_dist_px == 0.0
+
+    widget.edge_min_dist_px = -3.0
+    assert widget.edge_min_dist_px == 0.0
+
+
+def test_choose_lattice_edge_min_dist_px_change_invalidates_atoms() -> None:
+    widget = ChooseLattice(np.random.rand(16, 16).astype(np.float32))
+    widget.num_atoms = 5
+    widget.atom_bytes = b"placeholder"
+
+    widget.edge_min_dist_px = 10.0
+
+    assert widget.num_atoms == 0
+    assert widget.atom_bytes == b""
+    assert widget.status == "Edge margin changed - detect atoms again."
+
+
 def test_choose_lattice_static_png_b64_matches_frame_bytes() -> None:
     widget = ChooseLattice(np.random.rand(20, 30).astype(np.float32))
     png_b64 = widget._static_png_b64()

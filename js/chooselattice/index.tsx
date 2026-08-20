@@ -38,6 +38,9 @@ import Typography from "@mui/material/Typography";
 import Stack from "@mui/material/Stack";
 import Button from "@mui/material/Button";
 import Slider from "@mui/material/Slider";
+import IconButton from "@mui/material/IconButton";
+import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import { useTheme } from "../theme";
 import { extractBytes, extractFloat32, preserveRestoredWidgetModelsOnSave } from "../format";
 import { useHideStaticFallback } from "../staticFallback";
@@ -71,6 +74,7 @@ const ATOM_COLORS = [
 const ATOM_RADIUS_PX = 2.5;
 const GRID_COLOR = "rgba(64,169,255,0.45)";
 const MAX_GRID_LINES = 400;
+const EDGE_MARGIN_COLOR = "rgba(255,90,90,0.7)";
 
 // Averaged unit-cell inset: the kernel sends the tile pre-tiled 3x3 (see
 // _sync_cell_tile) so atoms near a cell edge aren't cut off, so the panel
@@ -160,12 +164,26 @@ function latticeIndexBounds(
   };
 }
 
-/** Draw the fitted lattice as two families of lines spanning the image. */
+/**
+ * Distance from each image edge excluded by `edge_min_dist_px`, clamped so
+ * the remaining region never inverts on a tiny image or a huge margin.
+ */
+function edgeInsetPx(marginPx: number, height: number, width: number): number {
+  return Math.max(0, Math.min(marginPx, height / 2 - 0.5, width / 2 - 0.5));
+}
+
+/**
+ * Draw the fitted lattice as two families of lines spanning the image,
+ * clipped to the `edge_min_dist_px` margin so the grid doesn't imply
+ * periodicity out to the very edge, where `detect_atoms()` won't place
+ * sites anyway.
+ */
 function drawLatticeGrid(
   ctx: CanvasRenderingContext2D,
   lat: number[][],
   height: number,
   width: number,
+  marginPx: number,
   imgToScreen: (row: number, col: number) => [number, number],
 ): void {
   const r0: Vec2 = [lat[0][0], lat[0][1]];
@@ -182,10 +200,11 @@ function drawLatticeGrid(
   // latticeIndexBounds gives the (n, m) range that COVERS the image corners,
   // but individual lines within that range still overshoot past the image
   // edges (it's a bounding box in lattice-index space, not image space).
-  // Clip to the actual image rectangle in screen space so nothing is ever
-  // drawn beyond the original image's dimensions.
-  const [ix0, iy0] = imgToScreen(0, 0);
-  const [ix1, iy1] = imgToScreen(height, width);
+  // Clip to the image rectangle inset by the edge margin, in screen space,
+  // so nothing is ever drawn beyond the excluded border.
+  const inset = edgeInsetPx(marginPx, height, width);
+  const [ix0, iy0] = imgToScreen(inset, inset);
+  const [ix1, iy1] = imgToScreen(height - inset, width - inset);
 
   ctx.save();
   ctx.beginPath();
@@ -237,6 +256,42 @@ function drawAtoms(
   ctx.restore();
 }
 
+/**
+ * Draw the excluded border as a dashed rectangle inset from the image edges
+ * by `marginPx` on every side, so the region `detect_atoms()` won't place
+ * sites in (via `edge_min_dist_px`) is visible before detecting.
+ */
+function drawEdgeMargin(
+  ctx: CanvasRenderingContext2D,
+  marginPx: number,
+  height: number,
+  width: number,
+  imgToScreen: (row: number, col: number) => [number, number],
+): void {
+  if (marginPx <= 0 || height <= 0 || width <= 0) return;
+  const inset = edgeInsetPx(marginPx, height, width);
+  if (inset <= 0) return;
+  const corners: Point[] = [
+    [inset, inset],
+    [inset, width - inset],
+    [height - inset, width - inset],
+    [height - inset, inset],
+  ];
+  ctx.save();
+  ctx.strokeStyle = EDGE_MARGIN_COLOR;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  corners.forEach(([row, col], i) => {
+    const [x, y] = imgToScreen(row, col);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
 function ChooseLattice() {
   const model = useModel();
   const rootRef = React.useRef<HTMLDivElement>(null);
@@ -281,6 +336,7 @@ function ChooseLattice() {
   const [maxSites, setMaxSites] = useModelState<number | null>("max_sites");
   const [snapToCommonSites, setSnapToCommonSites] = useModelState<boolean>("snap_to_common_sites");
   const [trueCellGeometry, setTrueCellGeometry] = useModelState<boolean>("true_cell_geometry");
+  const [edgeMinDistPx, setEdgeMinDistPx] = useModelState<number>("edge_min_dist_px");
   const handleMaxSitesChange = React.useCallback(
     (value: number) => setMaxSites(value <= MAX_SITES_MIN ? null : value),
     [setMaxSites],
@@ -346,6 +402,13 @@ function ChooseLattice() {
   const canvasW = CANVAS_SIZE;
   const canvasH = CANVAS_SIZE;
 
+  // Edge-margin slider range scales with the image so a tiny crop and a
+  // huge scan both get a usable range of excludable border widths.
+  const edgeMarginMax = React.useMemo(
+    () => Math.max(20, Math.floor(Math.min(width || 0, height || 0) / 4)),
+    [width, height],
+  );
+
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const uiRef = React.useRef<HTMLCanvasElement>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -360,6 +423,74 @@ function ChooseLattice() {
     el.addEventListener("wheel", prevent, { passive: false });
     return () => el.removeEventListener("wheel", prevent);
   }, []);
+
+  // Edge margin: scroll-adjusted or typed directly. Same non-passive-listener
+  // trick as above for the wheel part, since a synthetic onWheel can't
+  // actually block page scroll.
+  const edgeMarginRef = React.useRef<HTMLInputElement>(null);
+  const edgeMinDistPxRef = React.useRef(edgeMinDistPx);
+  React.useEffect(() => { edgeMinDistPxRef.current = edgeMinDistPx; }, [edgeMinDistPx]);
+  const stepEdgeMargin = React.useCallback((delta: number) => {
+    const current = edgeMinDistPxRef.current ?? 0;
+    const next = clamp(current + delta, 0, edgeMarginMax);
+    if (next !== current) setEdgeMinDistPx(next);
+  }, [edgeMarginMax, setEdgeMinDistPx]);
+
+  // Press-and-hold repeat for the edge-margin stepper buttons: step once
+  // immediately, pause, then repeat on an interval until released.
+  const holdTimerRef = React.useRef<number | null>(null);
+  const clearHoldTimer = React.useCallback(() => {
+    if (holdTimerRef.current != null) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  }, []);
+  const startEdgeMarginHold = React.useCallback((delta: number) => {
+    clearHoldTimer();
+    stepEdgeMargin(delta);
+    holdTimerRef.current = window.setTimeout(function repeat() {
+      stepEdgeMargin(delta);
+      holdTimerRef.current = window.setTimeout(repeat, 60);
+    }, 350);
+  }, [clearHoldTimer, stepEdgeMargin]);
+  React.useEffect(() => {
+    window.addEventListener("pointerup", clearHoldTimer);
+    return () => {
+      window.removeEventListener("pointerup", clearHoldTimer);
+      clearHoldTimer();
+    };
+  }, [clearHoldTimer]);
+  React.useEffect(() => {
+    const el = edgeMarginRef.current;
+    if (!el || busy) return;
+    const handleScroll = (e: WheelEvent) => {
+      e.preventDefault();
+      const step = e.shiftKey ? 5 : 1;
+      stepEdgeMargin(e.deltaY < 0 ? step : -step);
+    };
+    el.addEventListener("wheel", handleScroll, { passive: false });
+    return () => el.removeEventListener("wheel", handleScroll);
+  }, [busy, stepEdgeMargin]);
+
+  // Typed-input buffer: a free-form string while the field has focus (so an
+  // in-progress edit like "1" isn't clobbered by the synced trait value),
+  // reset from the trait whenever the field isn't focused (scroll-wheel
+  // edits included).
+  const [edgeMarginText, setEdgeMarginText] = React.useState(
+    () => String(Math.round(edgeMinDistPx ?? 0)),
+  );
+  const edgeMarginEditingRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!edgeMarginEditingRef.current) setEdgeMarginText(String(Math.round(edgeMinDistPx ?? 0)));
+  }, [edgeMinDistPx]);
+  const commitEdgeMarginText = React.useCallback((raw: string) => {
+    const parsed = Number(raw);
+    const next = Number.isFinite(parsed) && raw.trim() !== ""
+      ? clamp(Math.round(parsed), 0, edgeMarginMax)
+      : Math.round(edgeMinDistPxRef.current ?? 0);
+    setEdgeMinDistPx(next);
+    setEdgeMarginText(String(next));
+  }, [edgeMarginMax, setEdgeMinDistPx]);
 
   // Draw the base image with pan/zoom applied.
   React.useLayoutEffect(() => {
@@ -561,10 +692,13 @@ function ChooseLattice() {
     ctx.clearRect(0, 0, canvasW, canvasH);
 
     if (showGrid && latticeVectors && latticeVectors.length === 3) {
-      drawLatticeGrid(ctx, latticeVectors, height, width, imgToScreen);
+      drawLatticeGrid(ctx, latticeVectors, height, width, edgeMinDistPx ?? 0, imgToScreen);
     }
     if (showAtoms && atoms && atoms.length) {
       drawAtoms(ctx, atoms, canvasW, canvasH, imgToScreen);
+    }
+    if (hasImaging && edgeMinDistPx) {
+      drawEdgeMargin(ctx, edgeMinDistPx, height, width, imgToScreen);
     }
 
     const list = points || [];
@@ -605,6 +739,7 @@ function ChooseLattice() {
   }, [
     points, pointLabels, imgToScreen, canvasW, canvasH,
     latticeVectors, atoms, showGrid, showAtoms, height, width,
+    hasImaging, edgeMinDistPx,
   ]);
 
   // Averaged unit cell: the panel shows a 3x3 tiling of the averaged cell
@@ -900,30 +1035,110 @@ function ChooseLattice() {
         </Stack>
 
         {hasImaging && (
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: "26px" }}>
-            <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
-              Block size
-            </Typography>
-            <Slider
-              size="small"
-              min={BLOCK_SIZE_MIN_IDX}
-              max={BLOCK_SIZE_MAX_IDX}
-              step={1}
-              value={blockSizeIdx}
-              onChange={(_, v) => handleBlockSizeChange(v as number)}
-              disabled={busy}
-              valueLabelDisplay="auto"
-              valueLabelFormat={(v) => (v >= BLOCK_SIZE_MAX_IDX ? "None" : String(v))}
-              marks={[
-                { value: BLOCK_SIZE_MIN_IDX, label: "1" },
-                { value: BLOCK_SIZE_MAX_IDX, label: "None" },
-              ]}
-              sx={{ width: 180, mx: 1, color: themeColors.accent, ...sliderMarkSx() }}
-              aria-label="Block size"
-            />
-            <Typography sx={{ fontSize: 10, color: themeColors.textMuted, minWidth: 28 }}>
-              {blockSize == null ? "None" : blockSize}
-            </Typography>
+          <Stack direction="row" spacing={4} alignItems="center" sx={{ mb: "26px" }}>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
+                Block size
+              </Typography>
+              <Slider
+                size="small"
+                min={BLOCK_SIZE_MIN_IDX}
+                max={BLOCK_SIZE_MAX_IDX}
+                step={1}
+                value={blockSizeIdx}
+                onChange={(_, v) => handleBlockSizeChange(v as number)}
+                disabled={busy}
+                valueLabelDisplay="auto"
+                valueLabelFormat={(v) => (v >= BLOCK_SIZE_MAX_IDX ? "None" : String(v))}
+                marks={[
+                  { value: BLOCK_SIZE_MIN_IDX, label: "1" },
+                  { value: BLOCK_SIZE_MAX_IDX, label: "None" },
+                ]}
+                sx={{ width: 150, mx: 1, color: themeColors.accent, ...sliderMarkSx() }}
+                aria-label="Block size"
+              />
+              <Typography sx={{ fontSize: 10, color: themeColors.textMuted, minWidth: 28 }}>
+                {blockSize == null ? "None" : blockSize}
+              </Typography>
+            </Stack>
+
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography sx={{ fontSize: 10, color: themeColors.textMuted, whiteSpace: "nowrap" }}>
+                Edge margin
+              </Typography>
+              <Box
+                component="input"
+                ref={edgeMarginRef}
+                type="text"
+                inputMode="numeric"
+                value={edgeMarginText}
+                disabled={busy}
+                onFocus={() => { edgeMarginEditingRef.current = true; }}
+                onChange={(e) => setEdgeMarginText(e.target.value.replace(/[^0-9]/g, ""))}
+                onBlur={(e) => {
+                  edgeMarginEditingRef.current = false;
+                  commitEdgeMarginText(e.target.value);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    (e.target as HTMLInputElement).blur();
+                  } else if (e.key === "Escape") {
+                    edgeMarginEditingRef.current = false;
+                    setEdgeMarginText(String(Math.round(edgeMinDistPxRef.current ?? 0)));
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                sx={{
+                  font: "inherit",
+                  fontSize: 11,
+                  fontFamily: "monospace",
+                  color: EDGE_MARGIN_COLOR,
+                  bgcolor: "transparent",
+                  border: `1px solid ${themeColors.border}`,
+                  borderRadius: "4px",
+                  px: 1,
+                  py: 0.25,
+                  width: 40,
+                  textAlign: "center",
+                  cursor: busy ? "wait" : "text",
+                  opacity: busy ? 0.5 : 1,
+                  outline: "none",
+                  "&:focus": { borderColor: EDGE_MARGIN_COLOR },
+                }}
+                aria-label="Edge margin"
+              />
+              <Stack direction="column" sx={{ lineHeight: 0 }}>
+                <IconButton
+                  size="small"
+                  disabled={busy || (edgeMinDistPx ?? 0) >= edgeMarginMax}
+                  onMouseDown={() => startEdgeMarginHold(1)}
+                  onMouseUp={clearHoldTimer}
+                  onMouseLeave={clearHoldTimer}
+                  onTouchStart={() => startEdgeMarginHold(1)}
+                  onTouchEnd={clearHoldTimer}
+                  aria-label="Increase edge margin"
+                  sx={{ p: 0, color: themeColors.textMuted }}
+                >
+                  <KeyboardArrowUpIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+                <IconButton
+                  size="small"
+                  disabled={busy || (edgeMinDistPx ?? 0) <= 0}
+                  onMouseDown={() => startEdgeMarginHold(-1)}
+                  onMouseUp={clearHoldTimer}
+                  onMouseLeave={clearHoldTimer}
+                  onTouchStart={() => startEdgeMarginHold(-1)}
+                  onTouchEnd={clearHoldTimer}
+                  aria-label="Decrease edge margin"
+                  sx={{ p: 0, color: themeColors.textMuted }}
+                >
+                  <KeyboardArrowDownIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Stack>
+              <Typography sx={{ fontSize: 10, color: themeColors.textMuted }}>
+                px — scroll or type
+              </Typography>
+            </Stack>
           </Stack>
         )}
       </Box>
